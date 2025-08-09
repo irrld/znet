@@ -35,8 +35,6 @@ class PacketHandler : public PacketHandlerBase {
     auto it = m.find(std::type_index(typeid(*p)));
     if (it != m.end()) {
       it->second(static_cast<Derived*>(this), p);
-    } else {
-      call_unknown(static_cast<Derived*>(this), p);
     }
   }
 
@@ -45,22 +43,6 @@ class PacketHandler : public PacketHandlerBase {
 
   template<class...>
   using void_t = void;
-
-  // detection traits
-  template<typename T, typename = void>
-  struct has_unk_const : std::false_type {};
-  template<typename T>
-  struct has_unk_const<T,void_t<
-                              decltype(std::declval<T>().OnUnknown(std::declval<const Packet&>()))
-                              >> : std::true_type {};
-
-  // traits for OnUnknown(shared_ptr<Packet>)
-  template<typename T, typename = void>
-  struct has_unk_shared : std::false_type {};
-  template<typename T>
-  struct has_unk_shared<T,void_t<
-                               decltype(std::declval<T>().OnUnknown(std::declval<std::shared_ptr<Packet>>()))
-                               >> : std::true_type {};
 
   // traits for OnPacket(const P&)
   template<typename T, typename P, typename = void>
@@ -112,29 +94,6 @@ class PacketHandler : public PacketHandlerBase {
 
   template<typename D, typename P>
   static void call_pkt_shared(D*, std::shared_ptr<P>, std::false_type) {}
-
-  // unknown dispatcher
-  static void call_unknown(Derived* self, std::shared_ptr<Packet> p_base) {
-    call_unk_const (self, p_base, has_unk_const <Derived>{});
-    call_unk_shared(self, p_base, has_unk_shared<Derived>{});
-  }
-
-  // tag-dispatchers for OnUnknown
-  template<typename D>
-  static void call_unk_const(D* self, std::shared_ptr<Packet> p, std::true_type) {
-    self->OnUnknown(*p);
-  }
-
-  template<typename D>
-  static void call_unk_const(D*, std::shared_ptr<Packet>, std::false_type) {}
-
-  template<typename D>
-  static void call_unk_shared(D* self, std::shared_ptr<Packet> p, std::true_type) {
-    self->OnUnknown(p);
-  }
-
-  template<typename D>
-  static void call_unk_shared(D*, std::shared_ptr<Packet>, std::false_type) {}
 
 };
 

@@ -29,13 +29,6 @@ class MyPacketHandler : public PacketHandler<MyPacketHandler, DemoPacket> {
     session_->SendPacket(pk);
   }
 
-  // Fallback handler for any unrecognized packet types
-  // Currently ignores them, but you could add logging or error handling here
-  // This function is fully optional; you can omit it.
-  void OnUnknown(std::shared_ptr<Packet> p) {
-    // fallback for unknown types
-  }
-
  private:
   // The client session this handler is responsible for
   std::shared_ptr<PeerSession> session_;
