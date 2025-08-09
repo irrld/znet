@@ -12,6 +12,7 @@
 #pragma once
 
 #include "znet/precompiled.h"
+#include "znet/base/types.h"
 #include <ostream>
 #include <sstream>
 #include <iostream>

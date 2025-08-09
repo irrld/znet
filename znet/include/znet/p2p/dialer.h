@@ -121,7 +121,7 @@ class Dialer {
         return false;
       }
 
-      SetNonBlocking(a, true);
+      SetSocketBlocking(a, false);
 
       sockaddr_storage local_ss{};
       socklen_t local_len = sizeof(local_ss);

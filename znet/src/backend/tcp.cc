@@ -21,7 +21,7 @@ namespace znet {
 namespace backends {
 
 
-TCPTransportLayer::TCPTransportLayer(znet::SocketHandle socket) : socket_(socket) {
+TCPTransportLayer::TCPTransportLayer(SocketHandle socket) : socket_(socket) {
 
 }
 
