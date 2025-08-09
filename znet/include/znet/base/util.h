@@ -67,7 +67,7 @@ inline bool SetSocketBlocking(SocketHandle socket, bool blocking) {
   u_long mode = blocking ? 0UL : 1UL; // 1 to enable non-blocking socket
   return ioctlsocket(socket, FIONBIO, &mode) == 0;
 #else
-  int flags = fcntl(s, F_GETFL, 0);
+  int flags = fcntl(socket, F_GETFL, 0);
   if (flags == -1) {
     return false;
   }
@@ -76,7 +76,7 @@ inline bool SetSocketBlocking(SocketHandle socket, bool blocking) {
   } else {
     flags |=  O_NONBLOCK;
   }
-  return fcntl(s, F_SETFL, flags) == 0;
+  return fcntl(socket, F_SETFL, flags) == 0;
 #endif
 }
 
