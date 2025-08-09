@@ -31,6 +31,7 @@ class MyPacketHandler : public PacketHandler<MyPacketHandler, DemoPacket> {
 
   // Fallback handler for any unrecognized packet types
   // Currently ignores them, but you could add logging or error handling here
+  // This function is fully optional; you can omit it.
   void OnUnknown(std::shared_ptr<Packet> p) {
     // fallback for unknown types
   }
