@@ -28,11 +28,11 @@ Client::~Client() {
 
 Result Client::Bind() {
   Result init_result = Init();
-  if (init_result != Result::Success) {
+  if (init_result != Result::Success) [[unlikely]] {
     ZNET_LOG_ERROR("Cannot bind because initialization of znet had failed with reason: {}", GetResultString(init_result));
     return init_result;
   }
-  if (!backend_) {
+  if (!backend_) [[unlikely]] {
     return Result::InvalidBackend;
   }
   return backend_->Bind();
@@ -40,11 +40,11 @@ Result Client::Bind() {
 
 Result Client::Bind(const std::string& ip, PortNumber port) {
   Result init_result = Init();
-  if (init_result != Result::Success) {
+  if (init_result != Result::Success) [[unlikely]] {
     ZNET_LOG_ERROR("Cannot bind because initialization of znet had failed with reason: {}", GetResultString(init_result));
     return init_result;
   }
-  if (!backend_) {
+  if (!backend_) [[unlikely]] {
     return Result::InvalidBackend;
   }
   return backend_->Bind(ip, port);
@@ -54,33 +54,33 @@ Result Client::Connect() {
   if (task_.IsRunning()) {
     return Result::AlreadyConnected;
   }
-  if (!backend_) {
+  if (!backend_) [[unlikely]] {
     return Result::InvalidBackend;
   }
   Result result = backend_->Connect();
-  if (result != Result::Success) {
+  if (result != Result::Success) [[unlikely]] {
     return result;
   }
 
   client_session_ = backend_->client_session();
 
   // Connected to the server
-  task_.Run([this]() {
+  task_.Run([this](std::stop_token stop_token) {
     // setup
-    while (!client_session_->IsReady() && client_session_->IsAlive()) {
+    while (!client_session_->IsReady() && client_session_->IsAlive() && !stop_token.stop_requested()) {
       client_session_->Process();
       if (config_.connection_timeout.count() > 0 && client_session_->time_since_connect() > config_.connection_timeout) {
         ZNET_LOG_DEBUG("Connection to {} timed-out.", server_address_->readable());
         client_session_->Close();
       }
     }
-    if (!client_session_->IsAlive()) {
+    if (!client_session_->IsAlive() || stop_token.stop_requested()) {
       return;
     }
     ZNET_LOG_DEBUG("Connected to the server.");
     ClientConnectedToServerEvent connected_event{client_session_};
     event_callback()(connected_event);
-    while (client_session_->IsAlive()) {
+    while (client_session_->IsAlive() && !stop_token.stop_requested()) {
       client_session_->Process();
     }
     ZNET_LOG_DEBUG("Disconnected from the server.");

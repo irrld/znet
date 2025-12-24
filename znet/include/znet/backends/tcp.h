@@ -49,7 +49,7 @@ class TCPTransportLayer : public TransportLayer {
   bool SendInternal(std::shared_ptr<Buffer> buffer, SendOptions options);
 
   char data_[ZNET_MAX_BUFFER_SIZE]{};
-  int read_offset_ = 0;
+  ssize_t read_offset_ = 0;
   ssize_t data_size_ = 0;
   std::shared_ptr<Buffer> buffer_;
   SocketHandle socket_;
@@ -89,7 +89,7 @@ class TCPClientBackend : public ClientBackend {
   std::shared_ptr<InetAddress> local_address_;
   std::shared_ptr<PeerSession> client_session_;
   bool is_bind_ = false;
-  SocketHandle client_socket_ = -1;
+  SocketHandle client_socket_ = kSocketInvalid;
 };
 
 class TCPServerBackend : public ServerBackend {
@@ -116,7 +116,7 @@ class TCPServerBackend : public ServerBackend {
   std::shared_ptr<InetAddress> bind_address_;
   bool is_bind_ = false;
   bool is_listening_ = false;
-  SocketHandle server_socket_ = -1;
+  SocketHandle server_socket_ = kSocketInvalid;
 };
 
 }  // namespace backends

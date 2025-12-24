@@ -113,23 +113,23 @@ class Server : public Interface {
     std::mutex mutex_;
     SessionMap sessions_;
     std::unique_ptr<Task> task_;
-    bool running_ = true;
     Scheduler scheduler_{120};
     std::condition_variable cv_;
 
     TaskData() = default;
     ~TaskData() {
-      running_ = false;
-      cv_.notify_all();
+      // Request stop via stop_token
       if (task_) {
+        task_->RequestStop();
+        cv_.notify_all();
         task_->Wait();
       }
       sessions_.clear();
     }
+
     TaskData(TaskData&& other) noexcept
         : sessions_(std::move(other.sessions_)),
-          task_(std::move(other.task_)),
-          running_(other.running_) {
+          task_(std::move(other.task_)) {
       // new mutex_ is default constructed
     }
 
@@ -138,8 +138,7 @@ class Server : public Interface {
         std::lock_guard<std::mutex> lock(other.mutex_);
         sessions_ = std::move(other.sessions_);
         task_ = std::move(other.task_);
-        running_ = other.running_;
-        // mutex_ is not moved — stays as-is
+        // mutex_ is not moved, stays as-is
       }
       return *this;
     }
@@ -147,7 +146,7 @@ class Server : public Interface {
     TaskData& operator=(const TaskData&) = delete;
   };
 
-  void MainProcessor();
+  void MainProcessor(std::stop_token stop_token);
 
   void CheckNetwork();
   void ProcessSessions();

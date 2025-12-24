@@ -19,16 +19,36 @@
 #include <cstdint>
 #include <type_traits>
 
+// Forward declarations
+struct ReliableKey;
+struct OrderedKey;
+struct ChannelKey;
+
+// Helper struct for designated initializers
+struct SendOptionsInit {
+  bool reliable = true;
+  bool ordered = true;
+  uint8_t channel = 0;
+};
+
 class SendOptions {
  public:
+  // Default constructor
+  SendOptions() = default;
+
+  // Constructor accepting designated initializers
+  // Usage: SendOptions opts{.reliable = false, .channel = 2};
+  // Defined after key types (see below)
+  explicit SendOptions(const SendOptionsInit& init);
+
   template <typename Key>
-  void Set(typename Key::type value) {
+  void Set(Key::type value) {
     bitmask_ |= (1u << Key::id);
     Get<Key>() = value;
   }
 
   template <typename Key>
-  typename Key::type GetOr(typename Key::type def) const {
+  Key::type GetOr(Key::type def) const {
     return Has<Key>() ? Get<Key>() : def;
   }
 
@@ -65,5 +85,12 @@ struct ChannelKey  { using type = uint8_t; static constexpr int id = 2; };
 template <> inline const bool& SendOptions::Get<ReliableKey>() const { return data_.reliable; }
 template <> inline const bool& SendOptions::Get<OrderedKey>()  const { return data_.ordered;  }
 template <> inline const uint8_t& SendOptions::Get<ChannelKey>() const { return data_.channel; }
+
+// Constructor implementation (after key types are defined)
+inline SendOptions::SendOptions(const SendOptionsInit& init) {
+  Set<ReliableKey>(init.reliable);
+  Set<OrderedKey>(init.ordered);
+  Set<ChannelKey>(init.channel);
+}
 
 #endif  //ZNET_PARENT_SEND_OPTIONS_H

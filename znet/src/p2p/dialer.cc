@@ -37,6 +37,13 @@ bool WouldBlock(int e) {
 #endif
 }
 
+#if defined(TARGET_WIN)
+// On Windows the parameter is ignored
+constexpr int ToSelectNFDS(SocketHandle) { return 0; }
+#else
+constexpr int ToSelectNFDS(SocketHandle handle) { return handle + 1; }
+#endif
+
 std::shared_ptr<PeerSession> PunchSyncTCP(const std::shared_ptr<InetAddress>& local,
                                        const std::shared_ptr<InetAddress>& peer,
                                        Result* out_result,
@@ -110,11 +117,11 @@ std::shared_ptr<PeerSession> PunchSyncTCP(const std::shared_ptr<InetAddress>& lo
     FD_SET(socket_handle, &write_set);
     FD_SET(socket_handle, &error_set);
 
-    struct timeval tv;
+    timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 200000; // 200ms polling interval
 
-    int result = select(socket_handle + 1, NULL, &write_set, &error_set, &tv);
+    int result = select(ToSelectNFDS(socket_handle), nullptr, &write_set, &error_set, &tv);
     if (result < 0) {
 #ifdef TARGET_WIN
       if (LastErr() == WSAEINTR) {

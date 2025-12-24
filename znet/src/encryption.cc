@@ -196,21 +196,27 @@ unsigned char* ComputeSharedSecret(EVP_PKEY* pkey, EVP_PKEY* peer_pkey,
 bool DeriveKeyFromSharedSecret(const unsigned char* shared_secret,
                                size_t secret_len, unsigned char* key,
                                size_t key_len) {
-  EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
-  if (!pctx) {
-    std::cerr << "Failed to create EVP_PKEY_CTX for HKDF." << std::endl;
+  if (secret_len > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+      key_len > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    ZNET_LOG_ERROR("Secret or key length too large");
     return false;
   }
 
+  EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
+  if (!pctx) {
+    ZNET_LOG_ERROR("Failed to create EVP_PKEY_CTX for HKDF.");
+    return false;
+  }
+
+  size_t out_len = key_len;  // EVP_PKEY_derive needs size_t*
   if (EVP_PKEY_derive_init(pctx) <= 0 ||
       EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha256()) <= 0 ||
-      EVP_PKEY_CTX_set1_hkdf_salt(pctx, (unsigned char*)"salt", 4) <=
-          0 ||  // Example: Salt can be optional
-      EVP_PKEY_CTX_set1_hkdf_key(pctx, shared_secret, secret_len) <= 0 ||
-      EVP_PKEY_CTX_add1_hkdf_info(pctx, (unsigned char*)"info", 4) <=
-          0 ||  // Optional context info
-      EVP_PKEY_derive(pctx, key, &key_len) <= 0) {
-    std::cerr << "Failed to derive key using HKDF." << std::endl;
+      EVP_PKEY_CTX_set1_hkdf_salt(pctx, (unsigned char*)"salt", 4) <= 0 ||
+      EVP_PKEY_CTX_set1_hkdf_key(pctx, shared_secret,
+                                 static_cast<int>(secret_len)) <= 0 ||
+      EVP_PKEY_CTX_add1_hkdf_info(pctx, (unsigned char*)"info", 4) <= 0 ||
+      EVP_PKEY_derive(pctx, key, &out_len) <= 0) {  // THIS WAS MISSING!
+    ZNET_LOG_ERROR("Failed to derive key using HKDF.");
     EVP_PKEY_CTX_free(pctx);
     return false;
   }
@@ -293,19 +299,13 @@ int CalculateCipherTextLength(int plaintext_len) {
   // Assume these are set or calculated appropriately
   int block_size = 16;  // Block size in bytes (AES)
   int iv_size = 16;     // IV size in bytes (16 for CBC, 12 for GCM, etc.)
-  int auth_tag_size =
-      16;  // Tag size in bytes (only for authenticated modes like GCM)
 
   int ciphertext_len =
       plaintext_len + (block_size - (plaintext_len % block_size)) + iv_size;
-  //if (is_authenticated_mode) {
-  //  ciphertext_len += auth_tag_size;
-  //}
   return ciphertext_len;
 }
 
-EncryptionLayer::EncryptionLayer(PeerSession& session)
-    : session_(session) {
+EncryptionLayer::EncryptionLayer(PeerSession& session) : session_(session) {
   pub_key_ = GenerateKey();
   if (!pub_key_) {
     ZNET_LOG_ERROR(
@@ -323,8 +323,10 @@ EncryptionLayer::EncryptionLayer(PeerSession& session)
   session_.SetHandler(std::move(handler));
 
   auto codec = std::make_shared<Codec>();
-  codec->Add(HandshakePacket::GetPacketId(), std::make_unique<HandshakePacketSerializerV1>());
-  codec->Add(ConnectionReadyPacket::GetPacketId(), std::make_unique<ConnectionReadyPacketSerializerV1>());
+  codec->Add(HandshakePacket::GetPacketId(),
+             std::make_unique<HandshakePacketSerializerV1>());
+  codec->Add(ConnectionReadyPacket::GetPacketId(),
+             std::make_unique<ConnectionReadyPacketSerializerV1>());
   session_.SetCodec(std::move(codec));
 }
 
@@ -334,10 +336,10 @@ void EncryptionLayer::Initialize(bool send) {
   }
 }
 
-EncryptionLayer::~EncryptionLayer() {
-}
+EncryptionLayer::~EncryptionLayer() {}
 
-std::shared_ptr<Buffer> EncryptionLayer::HandleDecrypt(std::shared_ptr<Buffer> buffer) {
+std::shared_ptr<Buffer> EncryptionLayer::HandleDecrypt(
+    std::shared_ptr<Buffer> buffer) {
   auto mode = buffer->ReadInt<uint8_t>();
   if (mode == 0) {
     return buffer;  // no encryption
@@ -349,16 +351,17 @@ std::shared_ptr<Buffer> EncryptionLayer::HandleDecrypt(std::shared_ptr<Buffer> b
   auto* iv = new unsigned char[16];
   //memset(iv, 0, 16);
   buffer->Read(iv, 16);
-  int cipher_len = buffer->readable_bytes();
+  int cipher_len = static_cast<int>(buffer->readable_bytes());
   auto* actual = new unsigned char[cipher_len];
   const char* data_ptr = buffer->data() + buffer->read_cursor();
-  int actual_len = DecryptData(reinterpret_cast<const unsigned char*>(data_ptr), cipher_len,
-              key_, iv, actual);
+  int actual_len = DecryptData(reinterpret_cast<const unsigned char*>(data_ptr),
+                               cipher_len, key_, iv, actual);
   buffer->SkipRead(cipher_len);
   return std::make_shared<Buffer>(reinterpret_cast<char*>(actual), actual_len);
 }
 
-std::shared_ptr<Buffer> EncryptionLayer::HandleIn(std::shared_ptr<Buffer> buffer) {
+std::shared_ptr<Buffer> EncryptionLayer::HandleIn(
+    std::shared_ptr<Buffer> buffer) {
   return HandleDecrypt(buffer);
 }
 
@@ -370,11 +373,17 @@ bool EncryptionLayer::SendPacket(std::shared_ptr<Packet> packet) {
   return session_.transport_layer_->Send(buffer);
 }
 
-std::shared_ptr<Buffer> EncryptionLayer::HandleOut(std::shared_ptr<Buffer> buffer) {
+std::shared_ptr<Buffer> EncryptionLayer::HandleOut(
+    std::shared_ptr<Buffer> buffer) {
+  if (buffer->size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    ZNET_LOG_ERROR("Buffer length is too large");
+    return nullptr;
+    }
+  int buffer_len = static_cast<int>(buffer->size());
   std::shared_ptr<Buffer> new_buffer = std::make_shared<Buffer>();
   if (enable_encryption_) {
     auto* ciphertext =
-        new unsigned char[CalculateCipherTextLength(buffer->size())];
+        new unsigned char[CalculateCipherTextLength(buffer_len)];
     auto* iv = new unsigned char[16];
     if (!GenerateIV(iv, 16)) {
       ZNET_LOG_ERROR("Failed to generate random IV, will use zeros!");
@@ -384,31 +393,33 @@ std::shared_ptr<Buffer> EncryptionLayer::HandleOut(std::shared_ptr<Buffer> buffe
     // Encrypt the plaintext
     int ciphertext_len =
         EncryptData(reinterpret_cast<const unsigned char*>(buffer->data()),
-                    buffer->size(), key_, iv, ciphertext);
+                    buffer_len, key_, iv, ciphertext);
+
     new_buffer->ReserveExact(ciphertext_len + 2 + 8 + 16 + 8);
     new_buffer->WriteInt<uint8_t>(1);  // encryption enabled
     new_buffer->Write(iv, 16);
     new_buffer->Write(ciphertext, ciphertext_len);
 
-    auto* actual = new unsigned char[buffer->size()];
+    auto* actual = new unsigned char[buffer_len];
     DecryptData(ciphertext, ciphertext_len, key_, iv, actual);
     return new_buffer;
   }
-  new_buffer->ReserveExact(buffer->size() + 2);
+  new_buffer->ReserveExact(buffer_len + 2);
   new_buffer->WriteInt<uint8_t>(0);  // no encryption
-  new_buffer->Write(buffer->data(), buffer->size());
+  new_buffer->Write(buffer->data(), buffer_len);
   return new_buffer;
 }
 
-void EncryptionLayer::OnHandshakePacket(std::shared_ptr<HandshakePacket> packet) {
+void EncryptionLayer::OnHandshakePacket(
+    std::shared_ptr<HandshakePacket> packet) {
   if (peer_pkey_ || key_filled_) {
     ZNET_LOG_ERROR("Received handshake packet twice, closing the connection!");
     session_.Close();
     return;
   }
   peer_pkey_ = std::move(packet->pub_key_);
-  shared_secret_ =
-      ComputeSharedSecret(pub_key_.get(), peer_pkey_.get(), &shared_secret_len_);
+  shared_secret_ = ComputeSharedSecret(pub_key_.get(), peer_pkey_.get(),
+                                       &shared_secret_len_);
   if (!DeriveKeyFromSharedSecret(shared_secret_, shared_secret_len_, key_,
                                  key_len_)) {
     ZNET_LOG_ERROR(
@@ -425,7 +436,8 @@ void EncryptionLayer::OnHandshakePacket(std::shared_ptr<HandshakePacket> packet)
   }
 }
 
-void EncryptionLayer::OnAcknowledgePacket(std::shared_ptr<ConnectionReadyPacket> packet) {
+void EncryptionLayer::OnAcknowledgePacket(
+    std::shared_ptr<ConnectionReadyPacket> packet) {
   if (!peer_pkey_ || !key_filled_) {
     ZNET_LOG_ERROR(
         "Received connection complete packet it wasn't expected, closing the "

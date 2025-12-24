@@ -81,10 +81,12 @@ class IdentifySerializer : public PacketSerializer<IdentifyPacket> {
   ~IdentifySerializer() override = default;
 
   std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<IdentifyPacket> packet, std::shared_ptr<Buffer> buffer) override {
+    (void)packet;
     return buffer;
   }
 
   std::shared_ptr<IdentifyPacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
+    (void)buffer;
     auto packet = std::make_shared<IdentifyPacket>();
     return packet;
   }

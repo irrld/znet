@@ -34,7 +34,8 @@ std::shared_ptr<Buffer> TCPTransportLayer::Receive() {
     return new_buffer;
   }
 
-  data_size_ = recv(socket_, data_ + read_offset_, sizeof(data_) - read_offset_, 0);
+  data_size_ = recv(socket_, data_ + read_offset_,
+                    static_cast<int>(sizeof(data_) - read_offset_), 0);
 
   if (data_size_ > ZNET_MAX_BUFFER_SIZE) {
     Close();
@@ -51,7 +52,7 @@ std::shared_ptr<Buffer> TCPTransportLayer::Receive() {
   }
 
   if (data_size_ > 0) {
-    int full_size = data_size_ + read_offset_;
+    size_t full_size = data_size_ + read_offset_;
     if (full_size == ZNET_MAX_BUFFER_SIZE) {
       has_more_ = true;
     } else {
@@ -112,7 +113,8 @@ std::shared_ptr<Buffer> TCPTransportLayer::ReadBuffer() {
 }
 
 bool TCPTransportLayer::SendInternal(std::shared_ptr<Buffer> buffer, SendOptions options) {
-  while (send(socket_, buffer->data(), buffer->size(), 0) < 0) {
+  (void)options; // shutup compiler
+  while (send(socket_, buffer->data(), static_cast<int>(buffer->size()), 0) < 0) {
     if (errno == EWOULDBLOCK || errno == EAGAIN) {
       continue;
     }

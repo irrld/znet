@@ -117,7 +117,7 @@ class PeerSession {
     return std::chrono::steady_clock::now() - connect_time_;
   }
 
-  ZNET_NODISCARD long seconds_since_connect() const noexcept {
+  ZNET_NODISCARD uint64_t seconds_since_connect() const noexcept {
     return std::chrono::duration_cast<std::chrono::seconds>(
                time_since_connect()).count();
   }

@@ -37,7 +37,7 @@ class HandshakePacket : public Packet {
   HandshakePacket() : Packet(GetPacketId()) { }
   ~HandshakePacket() { }
 
-  static PacketId GetPacketId() { return -1; }
+  static PacketId GetPacketId() { return static_cast<PacketId>(-2); }
 
   UniquePKey pub_key_ = nullptr;
 };
@@ -79,7 +79,7 @@ class ConnectionReadyPacket : public Packet {
   ConnectionReadyPacket() : Packet(GetPacketId()) { }
   ~ConnectionReadyPacket() = default;
 
-  static PacketId GetPacketId() { return -2; }
+  static PacketId GetPacketId() { return static_cast<PacketId>(-3); }
 
   std::string magic_;
 };

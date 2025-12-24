@@ -23,6 +23,8 @@
 namespace znet {
 namespace p2p {
 
+static constexpr uint64_t kInvalidPunchId = std::numeric_limits<uint64_t>::max();
+
 struct PeerLocatorConfig {
   std::string server_ip;
   PortNumber server_port;
@@ -129,7 +131,7 @@ class PeerLocator {
   std::shared_ptr<InetAddress> target_endpoint_;
   ConnectionType connection_type_;
   std::string target_peer_name_;
-  uint64_t punch_id_ = ~0;
+  uint64_t punch_id_ = kInvalidPunchId;
 
   bool is_running_ = false;
 };

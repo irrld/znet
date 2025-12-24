@@ -12,7 +12,8 @@
 #pragma once
 
 #include "znet/precompiled.h"
-#include <fmt/core.h>
+#include <format>
+#include <iostream>
 
 // https://github.com/TheCherno/Hazel/blob/e4b0493999206bd2c3ff9d30fa333bcf81f313c8/Hazel/src/Hazel/Debug/Instrumentor.h#L207
 // Resolve which function signature macro will be used. Note that this only
@@ -50,8 +51,7 @@
 
 #ifdef _MSC_VER
 #define ZNET_PRINTFN(fmsg, func, msg, ...)               \
-  fmt::print(fmsg, func, fmt::format(msg, __VA_ARGS__)); \
-  std::cout << std::flush
+  std::cout << std::format(fmsg, func, std::format(msg, __VA_ARGS__)) << std::flush
 
 #if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_DEBUG
 #define ZNET_LOG_DEBUG(msg, ...)                                    \
@@ -86,8 +86,7 @@
 #endif
 #else
 #define ZNET_PRINTFN(fmsg, func, msg, args...)               \
-  fmt::print(fmsg, func, fmt::format(msg, ##args)); \
-  std::cout << std::flush
+  std::cout << std::format(fmsg, func, std::format(msg, ##args)) << std::flush
 
 #if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_DEBUG
 #define ZNET_LOG_DEBUG(msg, args...)                                    \

@@ -47,6 +47,9 @@ std::string GetAnyBindAddress(InetProtocolVersion version) {
       return "0.0.0.0";
     case InetProtocolVersion::IPv6:
       return "::";
+    default:
+      ZNET_LOG_ERROR("Invalid InetProtocolVersion: {}", static_cast<int>(version));
+      return "0.0.0.0";  // Fallback to IPv4
   }
 }
 
@@ -57,6 +60,9 @@ std::string GetLocalAddress(InetProtocolVersion version) {
       return "127.0.0.1";
     case InetProtocolVersion::IPv6:
       return "::1";
+    default:
+      ZNET_LOG_ERROR("Invalid InetProtocolVersion: {}", static_cast<int>(version));
+      return "127.0.0.1";  // Fallback to IPv4
   }
 }
 

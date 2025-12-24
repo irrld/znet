@@ -1,16 +1,14 @@
-cmake_minimum_required(VERSION 3.16.3)
-project(znet)
+cmake_minimum_required(VERSION 3.29)
+project(znet
+    VERSION 2.0.0
+    DESCRIPTION "Modern C++20 networking library"
+    LANGUAGES CXX
+)
 
-option(ZNET_USE_EXTERNAL_FMT "Looks for FMT via find_package" OFF)
+# Options
 option(ZNET_PREFER_STD_SLEEP "Prefers thread sleep to wait between ticks, this results in less precision of the timings but reduces CPU usage." OFF)
 option(ZNET_PREFER_IPV4 "Prefers IPv4 addresses." OFF)
-
-if(NOT MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fpermissive -Werror=vla -Wno-deprecated")
-endif()
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
-endif()
+option(ZNET_ENABLE_STRICT_WARNINGS "Enable strict compiler warnings" ON)
 
 set(ZNET_SOURCES
         src/scheduler.cc
@@ -38,12 +36,109 @@ add_library(znet STATIC
 )
 
 set_target_properties(znet PROPERTIES
-        CXX_STANDARD 14
-        CXX_STANDARD_REQUIRED ON
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF  # Disable compiler-specific extensions
 )
+
 target_precompile_headers(znet PRIVATE include/znet/precompiled.h)
 target_include_directories(znet PUBLIC include)
-## Defines
+
+# Compiler-specific warning flags (Modern CMake style)
+if(ZNET_ENABLE_STRICT_WARNINGS)
+    target_compile_options(znet PRIVATE
+        # MSVC warnings
+        $<$<CXX_COMPILER_ID:MSVC>:
+            /W4                          # High warning level
+            /analyze                     # Static analysis
+            /permissive-                 # Standards conformance
+            /w14242  # Conversion warnings
+            /w14254  # Operator conversion
+            /w14263  # Member function override
+            /w14265  # Virtual destructor
+            /w14287  # Unsigned/negative constant mismatch
+            /we4289  # Loop variable used outside scope (error)
+            /w14296  # Expression always true/false
+            /w14311  # Pointer truncation
+            /w14545  # Expression before comma evaluates to a function
+            /w14546  # Function call before comma missing argument list
+            /w14547  # Operator before comma has no effect
+            /w14549  # Operator before comma has no effect
+            /w14555  # Expression has no effect
+            /w14619  # Pragma warning
+            /w14640  # Thread-unsafe static member initialization
+            /w14826  # Conversion is sign-extended
+            /w14905  # String literal cast to LPSTR
+            /w14906  # Wide string literal cast to LPSTR
+            /w14928  # Illegal copy-initialization
+            /WX
+            /analyze:external-
+        >
+
+        # GCC warnings
+        $<$<CXX_COMPILER_ID:GNU>:
+            -Wall                        # Enable most warnings
+            -Wextra                      # Extra warnings
+            -Wpedantic                   # Pedantic warnings
+            -Wuninitialized              # Uninitialized variables
+            -Warray-bounds               # Array bounds checking
+            -Wstringop-overflow          # String operation overflow
+            -Wreturn-type                # Missing return statements
+            -Wimplicit-fallthrough       # Implicit switch fallthrough
+            -Wconversion                 # Type conversions
+            -Wsign-conversion            # Sign conversions
+            -Wcast-align                 # Cast alignment
+            -Wold-style-cast             # C-style casts
+            -Wshadow                     # Variable shadowing
+            -Wnull-dereference           # Null pointer dereference
+            -Wformat-security            # Format string security
+            -Wdelete-non-virtual-dtor    # Non-virtual destructor delete
+            -Werror=vla                  # Variable-length arrays (error)
+            $<$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,12.0>:
+                -Wuse-after-free         # Use-after-free (GCC 12+)
+                -Wdangling-pointer       # Dangling pointers (GCC 12+)
+            >
+        >
+
+        # Clang warnings
+        $<$<CXX_COMPILER_ID:Clang>:
+            -Wall                        # Enable most warnings
+            -Wextra                      # Extra warnings
+            -Wpedantic                   # Pedantic warnings
+            -Wuninitialized              # Uninitialized variables
+            -Wconditional-uninitialized  # Conditional uninitialized (Clang-specific)
+            -Warray-bounds               # Array bounds checking
+            -Wreturn-type                # Missing return statements
+            -Wimplicit-fallthrough       # Implicit switch fallthrough
+            -Wconversion                 # Type conversions
+            -Wsign-conversion            # Sign conversions
+            -Wcast-align                 # Cast alignment
+            -Wold-style-cast             # C-style casts
+            -Wshadow                     # Variable shadowing
+            -Wnull-dereference           # Null pointer dereference
+            -Wformat-security            # Format string security
+            -Wdelete-non-virtual-dtor    # Non-virtual destructor delete
+            -Werror=vla                  # Variable-length arrays (error)
+            $<$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,15.0>:
+                -Wdangling                # Dangling references (Clang 15+)
+                -Wdangling-field          # Dangling fields (Clang 15+)
+            >
+        >
+
+        # Common flags for GCC and Clang
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+            -Wno-deprecated              # Silence deprecated warnings (for now)
+            -Werror
+        >
+    )
+endif()
+
+# Platform-specific flags
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(znet PRIVATE -pthread)
+endif()
+
+# Defines
 if(ZNET_PREFER_STD_SLEEP)
     target_compile_definitions(znet PUBLIC ZNET_PREFER_STD_SLEEP)
 endif()
@@ -53,19 +148,13 @@ if(WIN32)
     target_link_libraries(znet PUBLIC winmm ws2_32)
 endif()
 
-# FMT
-if(ZNET_USE_EXTERNAL_FMT)
-    find_package(fmt CONFIG REQUIRED)
-endif()
-target_link_libraries(znet PUBLIC fmt::fmt)
-
 # OpenSSL
 find_package(OpenSSL REQUIRED)
-target_link_libraries(znet PUBLIC ${OPENSSL_SSL_LIBRARIES} ${OPENSSL_CRYPTO_LIBRARIES})
-target_include_directories(znet PUBLIC ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(znet PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
 # zstd
-if(ZNET_USE_EXTERNAL_FMT)
+option(ZNET_USE_EXTERNAL_ZSTD "Looks for ZSTD via find_package" OFF)
+if(ZNET_USE_EXTERNAL_ZSTD)
     find_package(zstd::zstd CONFIG REQUIRED)
 
     if(TARGET zstd::zstd)

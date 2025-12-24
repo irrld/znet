@@ -1,10 +1,12 @@
-cmake_minimum_required(VERSION 3.16.3)
-project(multiversion-server)
-
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+cmake_minimum_required(VERSION 3.29)
+project(multiversion-server LANGUAGES CXX)
 
 add_executable(multiversion-server main.cc)
+set_target_properties(multiversion-server PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
 target_link_libraries(multiversion-server PRIVATE znet)
-include_directories(../common)
+target_include_directories(multiversion-server PRIVATE ../common)
 

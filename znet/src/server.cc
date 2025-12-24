@@ -26,14 +26,14 @@ Server::Server(const ServerConfig& config) : Interface(), config_(config) {
   tasks_.resize(core_count);
   for (TaskData& data : tasks_) {
     data.task_ = std::make_unique<Task>();
-    data.task_->Run([this, &data]() {
+    data.task_->Run([this, &data](std::stop_token stop_token) {
       std::unique_lock<std::mutex> lock(data.mutex_);
-      while (data.running_) {
+      while (!stop_token.stop_requested()) {
         if (data.sessions_.empty() || !backend_->IsAlive()) {
           data.cv_.wait(lock, [&]() {
-            return !data.sessions_.empty() || !data.running_;
+            return !data.sessions_.empty() || stop_token.stop_requested();
           });
-          if (!data.running_) {
+          if (stop_token.stop_requested()) {
             break;
           }
         }
@@ -59,7 +59,7 @@ Server::~Server() {
 
 Result Server::Bind() {
   Result init_result = Init();
-  if (init_result != Result::Success) {
+  if (init_result != Result::Success) [[unlikely]] {
     ZNET_LOG_ERROR("Cannot bind because initialization of znet had failed with reason: {}", GetResultString(init_result));
     return init_result;
   }
@@ -75,14 +75,14 @@ Result Server::Listen() {
     return Result::AlreadyListening;
   }
   Result result = backend_->Listen();
-  if (result != Result::Success) {
+  if (result != Result::Success) [[unlikely]] {
     return result;
   }
 
   shutdown_complete_ = false;
 
-  task_.Run([this]() {
-    MainProcessor();
+  task_.Run([this](std::stop_token stop_token) {
+    MainProcessor(stop_token);
   });
   return Result::Success;
 }
@@ -104,12 +104,13 @@ bool Server::IsAlive() const {
   return backend_->IsAlive();
 }
 
-void Server::MainProcessor() {
+void Server::MainProcessor(std::stop_token stop_token) {
   ZNET_LOG_DEBUG("Listening connections from: {}", bind_address_->readable());
   ServerStartupEvent startup_event{*this};
   event_callback()(startup_event);
 
-  while (backend_->IsAlive()) {
+  // Check both backend state and stop_token
+  while (backend_->IsAlive() && !stop_token.stop_requested()) {
     std::lock_guard<std::mutex> lock(backend_->mutex());
     scheduler_.Start();
     CheckNetwork();

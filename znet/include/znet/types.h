@@ -11,6 +11,7 @@
 #pragma once
 
 #include "znet/precompiled.h"
+#include <bit>
 
 namespace znet {
 
@@ -28,26 +29,22 @@ using SessionId = uint64_t;
 
 enum class Endianness { LittleEndian, BigEndian };
 
-#if defined(__cpp_lib_endian) && (__cpp_lib_endian >= 201907L)
-#include <bit>
+constexpr auto operator<=>(Endianness lhs, Endianness rhs) noexcept {
+  return static_cast<int>(lhs) <=> static_cast<int>(rhs);
+}
 
-constexpr Endianness GetSystemEndianness() {
+constexpr bool operator==(Endianness lhs, Endianness rhs) noexcept {
+  return static_cast<int>(lhs) == static_cast<int>(rhs);
+}
+
+// must be evaluated at compile-time
+consteval Endianness GetSystemEndianness() {
   if constexpr (std::endian::native == std::endian::big) {
     return Endianness::BigEndian;
   } else {
     return Endianness::LittleEndian;
   }
 }
-#else
-inline Endianness GetSystemEndianness() {
-  static union {
-    uint32_t i;
-    uint8_t c[4];
-  } u = {0x01020304};
-  static Endianness e = (u.c[0] == 0x01) ? Endianness::BigEndian : Endianness::LittleEndian;
-  return e;
-}
-#endif
 
 enum class Result {
   Success,
@@ -71,6 +68,14 @@ enum class Result {
   CannotConnect,
   NotConnected
 };
+
+constexpr auto operator<=>(Result lhs, Result rhs) noexcept {
+  return static_cast<int>(lhs) <=> static_cast<int>(rhs);
+}
+
+constexpr bool operator==(Result lhs, Result rhs) noexcept {
+  return static_cast<int>(lhs) == static_cast<int>(rhs);
+}
 
 inline std::string GetResultString(Result result) {
   switch (result) {
@@ -126,6 +131,14 @@ enum class ConnectionType {
   //QUIC
 };
 
+constexpr auto operator<=>(ConnectionType lhs, ConnectionType rhs) noexcept {
+  return static_cast<int>(lhs) <=> static_cast<int>(rhs);
+}
+
+constexpr bool operator==(ConnectionType lhs, ConnectionType rhs) noexcept {
+  return static_cast<int>(lhs) == static_cast<int>(rhs);
+}
+
 #if defined(TARGET_APPLE) || defined(TARGET_WEB) || defined(TARGET_LINUX)
 using SocketHandle = int;
 using PortNumber = in_port_t;
@@ -138,5 +151,6 @@ using PortNumber = USHORT;
 using IPv4Address = IN_ADDR;
 using IPv6Address = IN6_ADDR;
 #endif
+constexpr SocketHandle kSocketInvalid = INVALID_SOCKET;
 
 }  // namespace znet

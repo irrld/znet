@@ -16,9 +16,20 @@
 
 namespace znet {
 
-// I hate this but since we dont have constexpr and other good features, in C++14
-// We cannot have something better for once...
-// I'll update this to work
+// Packet handler type constraints
+template<typename T, typename P>
+concept HasOnPacketConst = requires(T handler, const P& pkt) {
+  { handler.OnPacket(pkt) } -> std::same_as<void>;
+};
+
+template<typename T, typename P>
+concept HasOnPacketShared = requires(T handler, std::shared_ptr<P> pkt) {
+  { handler.OnPacket(pkt) } -> std::same_as<void>;
+};
+
+template<typename T>
+concept DerivedFromPacket = std::is_base_of_v<Packet, T>;
+
 struct PacketHandlerBase {
   virtual ~PacketHandlerBase() = default;
   virtual void Handle(std::shared_ptr<Packet> p) = 0;
@@ -40,22 +51,6 @@ class PacketHandler : public PacketHandlerBase {
  private:
   using HandlerFn = void(*)(Derived*, std::shared_ptr<Packet>);
 
-  // traits for OnPacket(const P&)
-  template<typename T, typename P, typename = void>
-  struct has_pkt_const : std::false_type {};
-  template<typename T, typename P>
-  struct has_pkt_const<T,P,void_t<
-                                 decltype(std::declval<T>().OnPacket(std::declval<const P&>()))
-                                 >> : std::true_type {};
-
-  // traits for OnPacket(shared_ptr<P>)
-  template<typename T, typename P, typename = void>
-  struct has_pkt_shared : std::false_type {};
-  template<typename T, typename P>
-  struct has_pkt_shared<T,P,void_t<
-                                  decltype(std::declval<T>().OnPacket(std::declval<std::shared_ptr<P>>()))
-                                  >> : std::true_type {};
-
   static const std::unordered_map<std::type_index, HandlerFn>& table() {
     static const auto tbl = [] {
       std::unordered_map<std::type_index, HandlerFn> m;
@@ -70,26 +65,15 @@ class PacketHandler : public PacketHandlerBase {
   template<typename P>
   static void call(Derived* self, std::shared_ptr<Packet> p_base) {
     auto p = std::static_pointer_cast<P>(p_base);
-    call_pkt_const <Derived,P>(self, p, has_pkt_const <Derived,P>{});
-    call_pkt_shared<Derived,P>(self, p, has_pkt_shared<Derived,P>{});
+
+    if constexpr (HasOnPacketConst<Derived, P>) {
+      self->OnPacket(static_cast<const P&>(*p));
+    }
+
+    if constexpr (HasOnPacketShared<Derived, P>) {
+      self->OnPacket(p);
+    }
   }
-
-  // tag-dispatchers for OnPacket
-  template<typename D, typename P>
-  static void call_pkt_const(D* self, std::shared_ptr<P> p, std::true_type) {
-    self->OnPacket(static_cast<const P&>(*p));
-  }
-
-  template<typename D, typename P>
-  static void call_pkt_const(D*, std::shared_ptr<P>, std::false_type) {}
-
-  template<typename D, typename P>
-  static void call_pkt_shared(D* self, std::shared_ptr<P> p, std::true_type) {
-    self->OnPacket(p);
-  }
-
-  template<typename D, typename P>
-  static void call_pkt_shared(D*, std::shared_ptr<P>, std::false_type) {}
 
 };
 
@@ -101,17 +85,15 @@ class CallbackPacketHandler : public PacketHandlerBase {
   std::unordered_map<std::type_index, RefHandlerFn> refHandlers;
 
  public:
-  template <typename T>
+  template <DerivedFromPacket T>
   void AddShared(std::function<void(std::shared_ptr<T>)> fn) {
-    static_assert(std::is_base_of<Packet, T>::value, "T must derive from Packet");
     sharedHandlers[typeid(T)] = [fn](std::shared_ptr<Packet> p) {
       fn(std::static_pointer_cast<T>(p));
     };
   }
 
-  template <typename T>
+  template <DerivedFromPacket T>
   void AddRef(std::function<void(const T&)> fn) {
-    static_assert(std::is_base_of<Packet, T>::value, "T must derive from Packet");
     refHandlers[typeid(T)] = [fn](std::shared_ptr<Packet> p) {
       fn(*std::static_pointer_cast<T>(p));
     };

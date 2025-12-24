@@ -1,7 +1,10 @@
-cmake_minimum_required(VERSION 3.16.3)
-project(znet-parent)
+cmake_minimum_required(VERSION 3.29)
+project(znet-parent
+    VERSION 3.0.0
+    DESCRIPTION "Modern C++20 networking library"
+    LANGUAGES CXX
+)
 
-add_subdirectory(vendor/fmt)
 add_subdirectory(vendor/zstd/build/cmake)
 add_subdirectory(znet)
 

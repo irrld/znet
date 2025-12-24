@@ -18,53 +18,56 @@
 #include <utility>
 
 namespace znet {
+
 class Task {
  public:
-  Task() {
-    thread_finished_ = true;
-  }
-  ~Task() {
-    Wait();
-  }
+  Task() = default;
+
+  // Destructor automatically requests stop and joins (std::jthread feature)
+  ~Task() = default;
 
   Task(const Task&) = delete;
-
   Task& operator=(const Task&) = delete;
 
+  // Move operations allowed
+  Task(Task&&) noexcept = default;
+  Task& operator=(Task&&) noexcept = default;
+
   ZNET_NODISCARD bool IsRunning() const {
-    return thread_ != nullptr;
+    return thread_.joinable();
   }
 
+  // Run function without stop_token (backward compatible)
   void Run(std::function<void()> run) {
-    thread_ = std::make_unique<std::thread>([this, run = std::move(run)]() {
+    thread_ = std::jthread([run = std::move(run)](std::stop_token) {
       run();
-      SignalThreadFinished();
     });
-    thread_finished_ = false;
   }
 
+  // Run function with stop_token for cooperative cancellation
+  void Run(std::function<void(std::stop_token)> run) {
+    thread_ = std::jthread(std::move(run));
+  }
+
+  // Request cooperative cancellation
+  void RequestStop() {
+    thread_.request_stop();
+  }
+
+  // Wait for thread to complete (blocks until done)
   void Wait() {
-    std::unique_lock<std::mutex> lock(mtx_);
-    cv_.wait(lock, [this] { return thread_finished_; });  // Wait for the signal that thread is finished
-    if (thread_ && thread_->joinable()) {
-      thread_->join();  // Safely join the thread
-      thread_ = nullptr;  // Now it's safe to reset the pointer
+    if (thread_.joinable()) {
+      thread_.join();
     }
   }
 
- private:
-  std::unique_ptr<std::thread> thread_;
-
-  std::mutex mtx_;  // Mutex for synchronization
-  std::condition_variable cv_;  // Condition variable for signaling
-  bool thread_finished_ = false;  // Flag to indicate thread completion
-
- private:
-  void SignalThreadFinished() {
-    std::lock_guard<std::mutex> lock(mtx_);
-    thread_finished_ = true;
-    cv_.notify_one();  // Notify waiting function
+  // Get stop token for external use
+  ZNET_NODISCARD std::stop_token GetStopToken() const {
+    return thread_.get_stop_token();
   }
+
+ private:
+  std::jthread thread_;
 };
 
 }

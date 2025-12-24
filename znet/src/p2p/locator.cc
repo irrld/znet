@@ -65,12 +65,18 @@ Result PeerLocator::Connect() {
 
   bind_endpoint_ = nullptr;
   target_endpoint_ = nullptr;
-  punch_id_ = ~0;
+  punch_id_ = kInvalidPunchId;
 
-  task_.Run([this]() {
+  task_.Run([this](std::stop_token stop_token) {
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock);
+    // Wait for notification or stop (MSVC doesn't support cv.wait with stop_token yet)
+    cv_.wait(lock, [&stop_token]() { return stop_token.stop_requested(); });
     is_running_ = false;
+    if (stop_token.stop_requested()) {
+      PeerLocatorCloseEvent event;
+      event_callback_(event);
+      return;
+    }
     if (bind_endpoint_ && target_endpoint_) {
       Result result;
       std::shared_ptr<PeerSession> session =
@@ -94,10 +100,10 @@ Result PeerLocator::Connect() {
   });
 
   Result result;
-  if ((result = client_.Bind()) != Result::Success) {
+  if ((result = client_.Bind()) != Result::Success) [[unlikely]] {
     return result;
   }
-  if ((result = client_.Connect()) != Result::Success) {
+  if ((result = client_.Connect()) != Result::Success) [[unlikely]] {
     return result;
   }
   ZNET_LOG_INFO("Relay client bound to {} and connected to {}", client_.local_address()->readable(),
@@ -139,6 +145,7 @@ bool PeerLocator::OnConnectEvent(ClientConnectedToServerEvent& event) {
 }
 
 bool PeerLocator::OnDisconnectEvent(ClientDisconnectedFromServerEvent& event) {
+    (void)event;
   cv_.notify_all();
   return false;
 }

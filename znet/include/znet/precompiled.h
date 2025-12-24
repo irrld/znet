@@ -11,6 +11,7 @@
 #pragma once
 
 //#define ZNET_PREFER_STD_SLEEP
+#define OPENSSL_SUPPRESS_DEPRECATED
 
 #include <cassert>
 #include <csignal>

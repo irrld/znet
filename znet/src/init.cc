@@ -61,7 +61,7 @@ class Initializer {
   Result result_ = Result::NotInitialized;
 };
 
-static std::unique_ptr<Initializer> init_;
+constinit static std::unique_ptr<Initializer> init_;
 
 Result Init() {
   if (!init_) {

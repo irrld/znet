@@ -16,6 +16,8 @@ namespace znet {
 
 using PacketId = uint64_t;
 
+constexpr PacketId kPacketNone = static_cast<PacketId>(-1);
+
 class Packet {
  public:
   explicit Packet(PacketId id) : id_(id) {}

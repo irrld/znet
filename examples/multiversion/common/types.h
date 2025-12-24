@@ -32,7 +32,7 @@ struct Vec3 {
   }
 
   std::string to_string() const {
-    return fmt::format("x: {}, y: {}, z: {}", x, y, z);
+    return std::format("x: {}, y: {}, z: {}", x, y, z);
   }
 };
 
