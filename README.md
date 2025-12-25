@@ -23,31 +23,28 @@ git submodule update --init --recursive
 
 2. **Link znet in your `CMakeLists.txt`:**
 
-Example using the bundled `fmt` and `zstd` inside znet
+Example using the bundled `zstd` inside znet
 
 ```cmake
-# Example using the bundled fmt and zstd inside znet
-add_subdirectory(external/znet/vendor/fmt ${CMAKE_CURRENT_BINARY_DIR}/fmt)
+# Example using the bundled zstd inside znet
 add_subdirectory(external/znet/vendor/zstd/build/cmake ${CMAKE_CURRENT_BINARY_DIR}/zstd)
 add_subdirectory(external/znet/znet ${CMAKE_CURRENT_BINARY_DIR}/znet)
 target_link_libraries(your_target PRIVATE znet)
 ```
 
-Example using your own `fmt` and `zstd` submodules
+Example using your own `zstd` submodules
 
 ```cmake
 # Example using your own submodules
-add_subdirectory(external/fmt)
 add_subdirectory(external/zstd/build/cmake)
 add_subdirectory(external/znet/znet)
 target_link_libraries(your_target PRIVATE znet)
 ```
 
-Example using system-installed `fmt` and `zstd` (e.g. vcpkg, brew, etc.)
+Example using system-installed `zstd` (e.g. vcpkg, brew, etc.)
 
 ```cmake
-# Example using system-installed fmt and zstd (e.g. vcpkg, brew, etc.)
-set(ZNET_USE_EXTERNAL_FMT ON)
+# Example using system-installed zstd (e.g. vcpkg, brew, etc.)
 set(ZNET_USE_EXTERNAL_ZSTD ON)
 add_subdirectory(external/znet/znet)
 target_link_libraries(your_target PRIVATE znet)
