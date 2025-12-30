@@ -44,6 +44,13 @@ set_target_properties(znet PROPERTIES
 target_precompile_headers(znet PRIVATE include/znet/precompiled.h)
 target_include_directories(znet PUBLIC include)
 
+target_compile_options(znet PUBLIC
+        # MSVC Options
+        $<$<CXX_COMPILER_ID:MSVC>:
+        /Zc:preprocessor
+        >
+)
+
 # Compiler-specific warning flags (Modern CMake style)
 if(ZNET_ENABLE_STRICT_WARNINGS)
     target_compile_options(znet PRIVATE

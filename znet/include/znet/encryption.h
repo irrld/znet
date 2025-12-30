@@ -28,7 +28,7 @@ using UniquePKey = std::unique_ptr<EVP_PKEY, PKeyDeleter>;
 
 unsigned char* SerializePublicKey(EVP_PKEY* pkey, uint32_t* len);
 
-UniquePKey DeserializePublicKey(const unsigned char* der, int len);
+UniquePKey DeserializePublicKey(const unsigned char* der, uint32_t len);
 
 UniquePKey CloneKey(const UniquePKey& k);
 
@@ -61,8 +61,7 @@ class HandshakePacketSerializerV1 : public PacketSerializer<HandshakePacket> {
 
   std::shared_ptr<HandshakePacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
     auto packet = std::make_shared<HandshakePacket>();
-    uint32_t len = buffer->ReadInt<uint32_t>();
-    if (len) {
+    if (uint32_t len = buffer->ReadInt<uint32_t>()) {
       // stack‑allocate a temp vector, read into it
       std::vector<unsigned char> tmp(len);
       buffer->Read(tmp.data(), len);

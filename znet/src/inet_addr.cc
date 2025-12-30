@@ -154,10 +154,10 @@ std::unique_ptr<InetAddress> InetAddress::from(const std::string& host, PortNumb
 
 std::unique_ptr<InetAddress> InetAddress::from(sockaddr* sock_addr) {
   if (sock_addr->sa_family == AF_INET) {
-    auto* addr = (sockaddr_in*)sock_addr;
+    auto* addr = reinterpret_cast<sockaddr_in*>(sock_addr);
     return std::make_unique<InetAddressIPv4>(addr->sin_addr, ntohs(addr->sin_port));
   } else if (sock_addr->sa_family == AF_INET6) {
-    auto* addr = (sockaddr_in6*)sock_addr;
+    auto* addr = reinterpret_cast<sockaddr_in6*>(sock_addr);
     return std::make_unique<InetAddressIPv6>(addr->sin6_addr, ntohs(addr->sin6_port));
   }
 

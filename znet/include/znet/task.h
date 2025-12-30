@@ -16,6 +16,7 @@
 
 #include <thread>
 #include <utility>
+#include <stop_token>
 
 namespace znet {
 

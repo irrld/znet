@@ -263,7 +263,7 @@ class Buffer {
       last_error_ = BufferError::ReadOutOfBounds;
       return 0;
     }
-    uint8_t actual_size = ReadChar();
+    unsigned char actual_size = ReadUnsignedChar();
     if (!CheckReadableBytes(actual_size)) [[unlikely]] {
       last_error_ = BufferError::ReadOutOfBounds;
       return 0;
@@ -305,7 +305,7 @@ class Buffer {
   Map ReadMap(KeyFunc key_func, ValueFunc value_func) {
     size_t size = ReadVarInt<size_t>();
     Map map;
-    for (int i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++) {
       auto key = (this->*key_func)();
       auto value = (this->*value_func)();
       map[key] = value;
@@ -318,7 +318,7 @@ class Buffer {
     size_t size = ReadVarInt<size_t>();
     std::vector<T> v;
     v.reserve(size);
-    for (int i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++) {
       v.push_back((this->*value_func)());
     }
     return v;
@@ -338,7 +338,7 @@ class Buffer {
       return nullptr;
     }
     std::unique_ptr<T[]> array(ptr);
-    for (int i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++) {
       array[i] = (this->*value_func)();
     }
     return array;
@@ -415,29 +415,29 @@ class Buffer {
   }
 
   template<HasWriteMethod T>
-  T WriteCustom() {
+  void WriteCustom(T& ptr) {
     if (!CheckSeal()) [[unlikely]] {
       return;
     }
-    return T::Write(*this);
+    ptr->Write(*this);
   }
 
-  void WriteInetAddress(InetAddress& address) {
+  void WriteInetAddress(const InetAddress& address) {
     if (!CheckSeal()) [[unlikely]] {
       return;
     }
     if (address.ipv() == InetProtocolVersion::IPv4) {
       WriteInt<uint8_t>(4);
       // raw IPv4 (network‐order) + port (network‐order)
-      auto* addr = reinterpret_cast<sockaddr_in*>(address.handle_ptr());
+      auto* addr = reinterpret_cast<const sockaddr_in*>(address.handle_ptr());
       Write(reinterpret_cast<const uint32_t*>(&addr->sin_addr.s_addr), 1);
-      Write(reinterpret_cast<const uint16_t*>(&addr->sin_port), 1);
+      Write(&addr->sin_port, 1);
     } else if (address.ipv() == InetProtocolVersion::IPv6) {
       WriteInt<uint8_t>(6);
-      auto* addr = reinterpret_cast<sockaddr_in6*>(address.handle_ptr());
+      auto* addr = reinterpret_cast<const sockaddr_in6*>(address.handle_ptr());
       // raw IPv6 (16 bytes) + port
       Write(addr->sin6_addr.s6_addr, 16);
-      Write(reinterpret_cast<const uint16_t*>(&addr->sin6_port), 1);
+      Write(&addr->sin6_port, 1);
     } else {
       WriteInt<uint8_t>(0);
     }
@@ -487,24 +487,24 @@ class Buffer {
     if (!CheckSeal()) [[unlikely]] {
       return;
     }
-    char* pt = reinterpret_cast<char*>(&c);
-    uint8_t size = sizeof(c);  // assume 1 byte for the size
-    uint8_t actual_size = 0;
+    auto* raw_data = reinterpret_cast<const char*>(&c);
+    unsigned char size = sizeof(c);  // assume 1 byte for the size
+    unsigned char actual_size = 0;
     for (uint8_t i = 0; i < size; i++) {
-      if (pt[i] != 0) {
+      if (raw_data[i] != 0) {
         actual_size = i + 1;
       }
     }
     ReserveIncremental(actual_size + 1);
-    WriteInt(actual_size);
+    WriteUnsignedChar(actual_size);
     // likely, most systems use native endianness
     if (GetSystemEndianness() == endianness_) [[likely]] {
       for (size_t i = 0; i < actual_size; i++) {
-        data_[write_cursor_ + i] = pt[i];
+        data_[write_cursor_ + i] = raw_data[i];
       }
     } else {
       for (size_t i = actual_size, j = 0; i > 0; i--, j++) {
-        data_[write_cursor_ + j] = pt[i - 1];
+        data_[write_cursor_ + j] = raw_data[i - 1];
       }
     }
     write_cursor_ += actual_size;
@@ -540,7 +540,7 @@ class Buffer {
       return;
     }
     WriteInt(size);
-    for (int i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++) {
       auto& value = v[i];
       (this->*value_func)(value);
     }
@@ -556,7 +556,7 @@ class Buffer {
       return;
     }
     WriteInt(size);
-    for (int i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++) {
       auto& value = v[i];
       (this->*value_func)(value);
     }
@@ -568,15 +568,15 @@ class Buffer {
       return;
     }
     WriteInt(size);
-    for (int i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++) {
       auto& value = v[i];
       (this->*value_func)(value);
     }
   }
 
-  std::string Dump(int width = 2, int wrap = 8) {
+  std::string Dump(int width = 2, size_t wrap = 8) const {
     std::string str;
-    for (int i = 0; i < write_cursor_; i++) {
+    for (size_t i = 0; i < write_cursor_; i++) {
       if (i != 0) {
         if (i % wrap == 0) {
           str += "\n";
@@ -584,7 +584,7 @@ class Buffer {
           str += " ";
         }
       }
-      str += ToHex((uint8_t)data_[i], width);
+      str += ToHex(static_cast<uint8_t>(data_[i]), width);
     }
     return str;
   }

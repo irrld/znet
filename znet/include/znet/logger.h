@@ -49,76 +49,39 @@
 #define ZNET_LOG_LEVEL ZNET_LOG_LEVEL_DEBUG
 #endif
 
-#ifdef _MSC_VER
 #define ZNET_PRINTFN(fmsg, func, msg, ...)               \
-  std::cout << std::format(fmsg, func, std::format(msg, __VA_ARGS__)) << std::flush
+std::cout << std::format(fmsg, func, std::format(msg __VA_OPT__(,) __VA_ARGS__)) << std::flush
 
 #if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_DEBUG
 #define ZNET_LOG_DEBUG(msg, ...)                                    \
-  ZNET_PRINTFN("\x1b[44m[debug]\x1b[0m \x1b[35m{}: \x1b[0m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, __VA_ARGS__)
+ZNET_PRINTFN("\x1b[44m[debug]\x1b[0m \x1b[35m{}: \x1b[0m{}\x1b[0m\n", \
+ZNET_FUNC_SIGN, msg, __VA_ARGS__)
 #else
 #define ZNET_LOG_DEBUG(msg, ...)
 #endif
 
 #if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_INFO
 #define ZNET_LOG_INFO(msg, ...)                                     \
-  ZNET_PRINTFN("\x1b[42m[info ]\x1b[0m \x1b[35m{}: \x1b[0m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, __VA_ARGS__)
+ZNET_PRINTFN("\x1b[42m[info ]\x1b[0m \x1b[35m{}: \x1b[0m{}\x1b[0m\n", \
+ZNET_FUNC_SIGN, msg, __VA_ARGS__)
 #else
 #define ZNET_LOG_INFO(msg, ...)
 #endif
 
 #if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_WARN
-#define ZNET_LOG_WARN(msg, ...)                                      \
-  ZNET_PRINTFN("\x1b[41m[warn ]\x1b[0m \x1b[35m{}: \x1b[31m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, __VA_ARGS__)
+#define ZNET_LOG_WARN(msg, ...)                                          \
+ZNET_PRINTFN("\x1b[41m[warn ]\x1b[0m \x1b[35m{}: \x1b[31m{}\x1b[0m\n", \
+ZNET_FUNC_SIGN, msg, __VA_ARGS__)
 #else
 #define ZNET_LOG_WARN(msg, ...)
 #endif
 
 #if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_ERROR
-#define ZNET_LOG_ERROR(msg, ...)                                     \
-  ZNET_PRINTFN("\x1b[41m[error]\x1b[0m \x1b[35m{}: \x1b[31m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, __VA_ARGS__)
+#define ZNET_LOG_ERROR(msg, ...)                                         \
+ZNET_PRINTFN("\x1b[41m[error]\x1b[0m \x1b[35m{}: \x1b[31m{}\x1b[0m\n", \
+ZNET_FUNC_SIGN, msg, __VA_ARGS__)
 #else
 #define ZNET_LOG_ERROR(msg, ...)
-#endif
-#else
-#define ZNET_PRINTFN(fmsg, func, msg, args...)               \
-  std::cout << std::format(fmsg, func, std::format(msg, ##args)) << std::flush
-
-#if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_DEBUG
-#define ZNET_LOG_DEBUG(msg, args...)                                    \
-  ZNET_PRINTFN("\x1b[44m[debug]\x1b[0m \x1b[35m{}: \x1b[0m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, ##args)
-#else
-#define ZNET_LOG_DEBUG(msg, args...)
-#endif
-
-#if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_INFO
-#define ZNET_LOG_INFO(msg, args...)                                     \
-  ZNET_PRINTFN("\x1b[42m[info ]\x1b[0m \x1b[35m{}: \x1b[0m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, ##args)
-#else
-#define ZNET_LOG_INFO(msg, args...)
-#endif
-
-#if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_WARN
-#define ZNET_LOG_WARN(msg, args...)                                          \
-  ZNET_PRINTFN("\x1b[41m[warn ]\x1b[0m \x1b[35m{}: \x1b[31m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, ##args)
-#else
-#define ZNET_LOG_WARN(msg, args...)
-#endif
-
-#if ZNET_LOG_LEVEL <= ZNET_LOG_LEVEL_ERROR
-#define ZNET_LOG_ERROR(msg, args...)                                         \
-  ZNET_PRINTFN("\x1b[41m[error]\x1b[0m \x1b[35m{}: \x1b[31m{}\x1b[0m\n", \
-               ZNET_FUNC_SIGN, msg, ##args)
-#else
-#define ZNET_LOG_ERROR(msg, args...)
-#endif
 #endif
 
 class LoggerInitializer {

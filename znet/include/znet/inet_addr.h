@@ -56,7 +56,7 @@ class InetAddress {
 
   ZNET_NODISCARD virtual socklen_t addr_size() const = 0;
 
-  ZNET_NODISCARD virtual sockaddr* handle_ptr() const = 0;
+  ZNET_NODISCARD virtual const sockaddr* handle_ptr() const = 0;
 
   ZNET_NODISCARD virtual PortNumber port() const = 0;
 
@@ -82,8 +82,8 @@ class InetAddressIPv4 : public InetAddress {
 
   ZNET_NODISCARD socklen_t addr_size() const override { return sizeof(addr_); }
 
-  ZNET_NODISCARD sockaddr* handle_ptr() const override {
-    return (sockaddr*)&addr_;
+  ZNET_NODISCARD const sockaddr* handle_ptr() const override {
+    return reinterpret_cast<const sockaddr*>(&addr_);
   }
 
   ZNET_NODISCARD PortNumber port() const override {
@@ -109,8 +109,8 @@ class InetAddressIPv6 : public InetAddress {
 
   ZNET_NODISCARD socklen_t addr_size() const override { return sizeof(addr_); }
 
-  ZNET_NODISCARD sockaddr* handle_ptr() const override {
-    return (sockaddr*)&addr_;
+  ZNET_NODISCARD const sockaddr* handle_ptr() const override {
+    return reinterpret_cast<const sockaddr*>(&addr_);
   }
 
   ZNET_NODISCARD PortNumber port() const override {

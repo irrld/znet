@@ -48,7 +48,7 @@ unsigned char* SerializePublicKey(EVP_PKEY* pkey, uint32_t* len) {
   return der;  // The caller must free this memory using OPENSSL_free
 }
 
-UniquePKey DeserializePublicKey(const unsigned char* der, int len) {
+UniquePKey DeserializePublicKey(const unsigned char* der, uint32_t len) {
   if (!der || len <= 0) {
     return nullptr;
   }

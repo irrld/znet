@@ -118,8 +118,9 @@ class PeerSession {
   }
 
   ZNET_NODISCARD uint64_t seconds_since_connect() const noexcept {
-    return std::chrono::duration_cast<std::chrono::seconds>(
-               time_since_connect()).count();
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            time_since_connect()).count());
   }
 
   ZNET_NODISCARD CompressionType out_compression_type() const {

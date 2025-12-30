@@ -23,7 +23,7 @@ void Scheduler::SetTicksPerSecond(int tps) {
   }
   tps_ = tps;
   target_delta_time_ = std::chrono::duration_cast<Duration>(
-      std::chrono::seconds(1) / (float)tps);
+      std::chrono::seconds(1) / static_cast<float>(tps));
 }
 
 void Scheduler::Start() {
@@ -52,18 +52,17 @@ void Scheduler::PreciseSleep(Duration duration) {
   double mean = 5e-3;
   double m2 = 0;
   double count = 1;
-  double observed = 0;
   double delta = 0;
   double stddev = 0;
 
   // microseconds to seconds
-  double seconds = duration.count() / 1000000.0;
+  double seconds = static_cast<double>(duration.count()) / 1000000.0;
   while (seconds > estimate) {
     TimePoint start = Clock::now();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     TimePoint end = Clock::now();
 
-    observed = (end - start).count() / 1000000000.0;
+    double observed = static_cast<double>((end - start).count()) / 1000000000.0;
     seconds -= observed;
 
     count++;
@@ -76,5 +75,5 @@ void Scheduler::PreciseSleep(Duration duration) {
 
   // spin lock
   TimePoint start = Clock::now();
-  while ((Clock::now() - start).count() / 1000000000.0 < seconds);
+  while (static_cast<double>((Clock::now() - start).count()) / 1000000000.0 < seconds);
 }
