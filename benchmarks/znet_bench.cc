@@ -445,7 +445,8 @@ void RunCongestion(ConnectionType type, const bench::CongestionCase& c) {
           auto packet = std::make_shared<BenchPacket>();
           packet->seq = seq;
           packet->payload = probe_payload;
-          return h.client_session->SendPacket(packet, kProbeOptions);
+          return h.client_session->SendPacket(packet, kProbeOptions) ==
+                 Result::Success;
         },
         [&]() {
           bench::PumpCounts counts;

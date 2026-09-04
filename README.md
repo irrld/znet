@@ -84,151 +84,131 @@ everything else.
 
 ## Benchmarks
 
-Two link conditions, a clean loopback and the same traffic over a link with 5%
-packet loss and a 50 ms round trip, measured three ways: peak throughput, idle
-round trip, and a sustained transfer with a probe running through it.
+znet against three peer libraries and a raw-socket floor, on clean loopback and
+over a link with 5% packet loss and a 50 ms round trip. Throughput is messages
+per second at three payload sizes; latency is a 64 B ping-pong. `znet` is the
+default build (AES-256-GCM plus zstd); `znet-raw` turns both off, the
+like-for-like row against ENet and RakNet, which send plaintext. Every row is
+the median of five runs on one machine (Ryzen 9 9950X3D, Linux 7.2, GCC 16), so
+they compare with each other and nothing else.
 
-Below are the comparison tables and a short read of each.
-**[benchmarks/README.md](benchmarks/README.md) covers how they were produced:**
-running and reproducing them, what each measurement does and does not support,
-the per-row caveats behind the footnotes, and the open problems. It also carries
-the measurements that are not headline comparisons, such as what compression is
-worth per traffic type.
-
-`znet` is the default build (AES-256-GCM + zstd). `znet-raw` has both off, which is
-the like-for-like row against ENet and RakNet, which send plaintext. Throughput
-is messages per second at three payload sizes; latency is a 64 B ping-pong round
-trip. Every row was measured in one sitting on one machine (Ryzen 9 9950X3D,
-Linux 7.1.5, GCC), so they can be read against each other but not against a
-table from anywhere else.
+[benchmarks/README.md](benchmarks/README.md) is how to reproduce them and how
+to read them: what each measurement does and does not support, why the floors
+are floors, and the open problems.
 
 ### Over a lossy link
 
-5% packet loss, 50 ms round trip. Message counts are scaled down for the longer
-round trip, so these numbers compare only with each other.
+Message counts are scaled for the longer round trip, so these compare only with
+each other. Latency percentiles are milliseconds.
 
-Each cell is the median of five runs; latency percentiles pool all five.
+|                        |       64 B |     1 KiB |         8 KiB |     p50 |   p95 |   p99 |
+|------------------------|-----------:|----------:|--------------:|--------:|------:|------:|
+| **znet ZDT**           | **27,471** | **8,959** |     **1,499** |    50.1 |   151 |   176 |
+| **znet ZDT-raw**       |     26,285 |     8,815 |         1,500 |    50.0 |   151 |   176 |
+| GNS (Valve) ₁          |     22,629 |       823 |            35 |    50.1 |   260 |   262 |
+| ENet                   |     16,356 |     1,066 |           131 |    50.0 |   112 |   112 |
+| raw UDP *(floor)* ₂    |     38,364 |    38,899 |         5,093 |    50.0 |  50.0 |  50.0 |
+| raw TCP *(floor)*      |      2,946 |       136 |            18 |    50.1 |   404 |   469 |
+| znet TCP               |      1,282 |       134 | *unsupported* |    50.0 |   308 |   431 |
+| RakNet                 |      1,032 |    69 ₃   |         9 ₃   |    70.1 |   230 |   311 |
 
-|                             |       64 B |     1 KiB |         8 KiB |         p50 |     p95 |     p99 |
-|-----------------------------|-----------:|----------:|--------------:|------------:|--------:|--------:|
-| **znet ZDT** ₁              | **27,708** |     5,374 |           894 |     50.1 ms |     151 |     210 |
-| **znet ZDT-raw** ₁          |     25,395 | **6,714** |     **1,033** |     50.1 ms |     151 |     201 |
-| GNS (Valve) ₂ ₃             |     18,018 |     1,619 |            34 |     50.1 ms |     260 |     262 |
-| ENet ₃                      |     14,077 |     1,027 |           131 | **50.0 ms** | **112** | **137** |
-| raw UDP *(syscall floor)* ₅ |     38,603 |    38,804 |         5,098 |     50.1 ms |    50.1 |    50.2 |
-| raw TCP *(syscall floor)*   |      2,865 |       133 |            19 |     50.1 ms |     402 |     471 |
-| **znet TCP**                |      1,635 |     129 ₄ | *unsupported* |     50.4 ms |     310 |     434 |
-| **znet TCP-raw**            |      1,619 |     136 ₄ | *unsupported* |     50.4 ms |     311 |     462 |
-| RakNet                      |      1,070 |      69 ₄ |           9 ₄ |     70.1 ms |     230 |     261 |
-
-znet leads every payload size here: ZDT at 64 B and the raw arm at 1 KiB and
-8 KiB, the two being inside each other's spread. Taking the default ZDT row,
-that is 1.5x, 3.3x and 26x what GNS does and 2.0x, 5.2x and 6.8x what ENet
-does. On the tail the two encrypted transports split: znet holds p95 at 151 ms
-against GNS's 260, and p99 at 210 against 262. Of the reliable transports ENet
-is the tightest at every
-percentile, at a fifth to a seventh of znet ZDT's throughput at 1 KiB and above;
-the raw UDP row is lower still but retransmits nothing, so it is a floor rather
-than a rival.
-
-Read every row with its spread, not just its median. Seventeen of the
-twenty-eight throughput cells measured vary by more than a quarter across their
-five runs and seven by more than double, against one and none respectively on
-the clean table, so a single measurement under loss is not a number.
-`ZNET_BENCH_REPS` is what produced the medians here.
+znet ZDT leads every reliable transport at every size: against GNS that is 1.2x,
+11x and 43x, against ENet 1.7x, 8.4x and 11x. Encryption costs nothing here, the
+default and raw rows are inside each other's spread, because a lossy link is
+never CPU-bound. The raw UDP row is unreliable and drops what it loses, so it is
+a datagram-rate ceiling rather than a rival.
 
 ### Clean loopback
 
-|                           |          64 B |       1 KiB |         8 KiB | encryption  |
-|---------------------------|--------------:|------------:|--------------:|-------------|
-| ENet                      |     5,742,000 |   1,191,000 |       170,000 | none        |
-| **znet ZDT-raw**          | **1,978,000** | **333,000** |        59,900 | none        |
-| **znet ZDT**              | **1,679,000** | **306,000** |    **60,500** | AES-256-GCM |
-| raw UDP *(syscall floor)* |     1,647,000 |   1,579,000 |     1,043,000 | n/a         |
-| GNS (Valve) ₂             |     1,459,000 |      98,800 |        11,500 | AES-GCM     |
-| raw TCP *(syscall floor)* |       614,000 |     547,000 |       488,000 | n/a         |
-| RakNet                    |        48,200 |      42,200 |        76,800 | none        |
-| **znet TCP-raw**          |    **30,400** |  **30,200** | *unsupported* | none        |
-| **znet TCP**              |    **30,400** |  **30,200** | *unsupported* | AES-256-GCM |
+|                        |          64 B |       1 KiB |         8 KiB | encryption  |
+|------------------------|--------------:|------------:|--------------:|-------------|
+| ENet                   | **5,505,973** | **1,137,134** |   **162,442** | none        |
+| **znet ZDT-raw**       | **2,162,583** | **460,909** |    **94,645** | none        |
+| **znet ZDT**           | **1,968,692** | **396,244** |    **73,647** | AES-256-GCM |
+| raw UDP *(floor)*      |     1,495,737 |   1,449,640 |       986,895 | n/a         |
+| GNS (Valve) ₁          |     1,481,565 |      98,792 |        11,675 | AES-GCM     |
+| raw TCP *(floor)*      |       546,213 |     527,331 |       467,391 | n/a         |
+| RakNet                 |        48,289 |      41,567 |        74,969 | none        |
+| znet TCP-raw           |     1,013,401 |     737,535 | *unsupported* | none        |
+| znet TCP               |     1,002,566 |     365,212 | *unsupported* | AES-256-GCM |
 
-|                   |          p50 |      p95 |      p99 |
-|-------------------|-------------:|---------:|---------:|
-| raw UDP *(floor)* |       3.1 µs |      5.5 |      7.1 |
-| ENet              |       3.3 µs |      3.4 |      3.4 |
-| raw TCP *(floor)* |       4.5 µs |      6.0 |      7.4 |
-| GNS (Valve)       |      10.0 µs |    1,063 |    2,115 |
-| **znet ZDT-raw**  |  **12.5 µs** | **14.8** | **17.9** |
-| **znet ZDT**      |  **13.5 µs** | **15.2** | **19.5** |
-| **znet TCP-raw**  | **8,387 µs** |    8,400 |    8,404 |
-| **znet TCP**      | **8,392 µs** |    8,401 |    8,407 |
-| RakNet            |    20,067 µs |   20,088 |   20,120 |
+Latency, a 64 B round trip in microseconds:
 
-ENet leads every library here on both. Of the two encrypted datagram transports,
-znet ZDT holds p95 within 1.2x of its median and p99 within 1.5x, where GNS sits
-106x and 211x above its own. The default profile costs about 1.18x at 64 B and
-1.09x at 1 KiB against `znet-raw`, and is inside the run-to-run spread at
-8 KiB, so it is per-message overhead rather than per-byte cost. That gap is
-crypto *and* compression: `-raw` turns both off, and above the 128 B threshold
-the default profile also pays a zstd pass that incompressible payloads cannot
-repay.
+|                  |      p50 |      p95 |      p99 |
+|------------------|---------:|---------:|---------:|
+| raw UDP *(floor)*|      3.1 |      4.4 |      6.4 |
+| ENet             |      3.6 |      3.6 |      3.6 |
+| raw TCP *(floor)*|      6.5 |      7.3 |      9.6 |
+| GNS (Valve)      |     12.5 |    1,068 |    2,121 |
+| **znet ZDT-raw** | **13.0** | **16.1** | **21.4** |
+| **znet ZDT**     | **13.9** | **17.9** | **22.8** |
+| znet TCP         |    252.4 |    255.3 |    268.6 |
+| RakNet           |   20,074 |   20,142 |   20,168 |
 
-Loopback has no loss and a microsecond round trip, so neither congestion control
-nor loss recovery runs; see
-[why the clean tables flatter TCP](benchmarks/README.md#why-the-clean-tables-flatter-tcp).
+ENet leads on a clean link; of the encrypted datagram transports znet ZDT holds
+its tail within 1.6x of its median where GNS runs to 170x its own. The default
+profile costs about 1.1x against raw at 64 B and 1 KiB and is inside the spread
+at 8 KiB, so it is per-message overhead, not per-byte. Loopback runs neither
+congestion control nor loss recovery, so it flatters TCP; see
+[why](benchmarks/README.md#why-the-clean-tables-flatter-tcp).
 
 ### Under sustained load
 
-The tables above measure a burst finishing as fast as it can. This one runs a
-1 KiB transfer for ten seconds and sends a 64 B probe through it, so `steady` is
-the rate over the second half, once slow-start is past, and `loaded` is what a
-small message costs while the link is saturated. That pair is what a congestion
-controller is actually judged on, and it is the only view here where a
-transport can win the throughput column by simply filling a queue and leaving
-everything else stuck behind it.
+A 1 KiB transfer runs for ten seconds with a 64 B probe travelling through it.
+`steady` is the rate over the second half, past slow-start; `loaded` is what the
+probe costs while the link is saturated. The two compare like for like only
+within one `probe` value: `channel` is the probe on its own ordered stream,
+`conn` on its own connection, `none` on the same stream as the transfer.
 
-The `probe` column says how the probe was kept off the bulk stream, and the
-loaded figures only compare like for like within one value of it: `channel` is
-its own ordered stream, `conn` its own connection, `none` the same stream as the
-transfer, where it is head-of-line blocked as well as queued.
+|                        | probe   |  clean steady | clean loaded p50 | lossy steady | lossy loaded p50 |
+|------------------------|---------|--------------:|-----------------:|-------------:|-----------------:|
+| ENet                   | channel | **1,110,320** |          3.8 ms  |        1,041 |         121.6 ms |
+| raw TCP *(floor)*      | conn    |       521,153 |     **0.01 ms**  |          162 |          50.1 ms |
+| **znet ZDT-raw**       | channel |   **407,357** |          0.02 ms |    **9,726** |          80.1 ms |
+| **znet ZDT**           | channel |   **376,974** |          0.03 ms |    **9,738** |          80.1 ms |
+| GNS (Valve)            | none    |        87,201 |         47.5 ms  |        1,331 |         338.9 ms |
+| RakNet                 | channel |        47,607 |         87.5 ms  |           65 |             ₄    |
+| znet TCP               | none    |       365,144 |         11.0 ms  |          127 |             ₄    |
 
-|                         | probe   |  clean steady | clean loaded p50 | lossy steady | lossy loaded p50 |
-|-------------------------|---------|--------------:|-----------------:|-------------:|-----------------:|
-| ENet                    | channel | **1,157,000** |           3.6 ms |        1,043 |         1,864 ms |
-| raw TCP *(cubic floor)* | conn    |       564,000 |      **0.03 ms** |          163 |        **50 ms** |
-| **znet ZDT-raw**        | channel |   **370,000** |          11.0 ms |    **5,591** |           481 ms |
-| **znet ZDT**            | channel |   **319,000** |          12.5 ms |    **4,867** |           633 ms |
-| GNS (Valve)             | none    |        86,200 |          47.4 ms |        1,481 |                ₆ |
-| RakNet                  | channel |        47,600 |          87.6 ms |           69 |                ₆ |
-| **znet TCP**            | none    |    **30,500** |         140.0 ms |          123 |                ₆ |
+Under loss ZDT carries several times what GNS and ENet do while holding the
+probe below either, which is the trade a delay-sensitive controller exists to
+make. On a clean link its channel keeps the probe at a hundredth of a
+millisecond, next to the raw TCP floor.
 
-Under loss ZDT carries 3.3x what GNS does and 4.7x what ENet does. Against ENet,
-the one row measured the same way, it does that while holding a small message to
-a third of the delay: that is the trade a delay-sensitive controller exists to
-make, and it is the clearest thing the suite shows.
+### System calls per message
 
-On clean loopback the same rows are less flattering. ZDT's loaded p50 is 12.5 ms
-against ENet's 3.6 ms on the same separation, and against 0.03 ms for kernel TCP
-on its own connection. Saturated, a small message waits behind the bulk queue
-even on its own channel, because a separate channel buys a separate sequence
-space rather than a separate queue. Unexplained, and the first thing to look at
-if the send path is reworked.
+Counted at the libc boundary on the clean run, so a message's cost in kernel
+entries is comparable across libraries. Small messages batch into a datagram, a
+1 KiB message is about one datagram each way, and 8 KiB fragments across the
+MTU, which is what the three columns track.
 
-Footnotes, each explained in full in [benchmarks/README.md](benchmarks/README.md):
-₁ znet ZDT collapses intermittently under loss, so these medians are honest but
-not a steady state, and the cause is still open. Every ZDT cell spans 2.8x to
-4.3x across its five runs, the worst being 8 KiB at 351..1,497 msg/s.
-₂ Lower bound: GNS clamps its own send rate internally, so these rows measure
+|                  |   64 B |  1 KiB |  8 KiB |
+|------------------|-------:|-------:|-------:|
+| RakNet           |   0.11 |   2.00 |  14.00 |
+| ENet             |   0.17 |   2.11 |  14.87 |
+| **znet ZDT-raw** |   0.21 |   2.71 |  14.61 |
+| **znet ZDT**     |   0.27 |   2.62 |  15.59 |
+| GNS (Valve)      |   0.59 |   1.96 |  16.22 |
+
+The four are within a call of each other for the same datagram count. ENet under
+loss is the exception and is left out: it is serviced in a tight application
+loop, so a rare delivery charges the whole spin to that message rather than to
+the protocol.
+
+### Reading the numbers
+
+A single run under loss is not a number: several throughput cells vary by more
+than a quarter across five runs, so read every row as a median with its spread.
+The footnotes and the per-row caveats are in
+[benchmarks/README.md](benchmarks/README.md).
+
+₁ GNS clamps its own send rate internally, so its 1 KiB and 8 KiB rows measure
 that limiter rather than the protocol.
-₃ The same intermittent collapse as ZDT, measured on ENet and GNS rather than
-assumed absent. Neither is steady under loss either: GNS's 1 KiB row spans 2.7x
-and ENet's 64 B row 1.5x, though ENet is the tighter of the two here.
-₄ Did not finish at the 60 s deadline; the row is marked `TIMEOUT` in the
-benchmark's own output.
-₅ Unreliable, so it is not a rival: at 5% loss it simply drops what it loses and
-its counts are what arrived, not what a reliable protocol had to recover.
-₆ Too few probes returned inside the 2 s timeout to quote a percentile: none at
-all for RakNet and znet TCP, and two of six for GNS. The link being too
-congested for a small message to complete a round trip is itself the result.
+₂ Unreliable: at 5% loss it drops what it loses, so its count is what arrived,
+not what a reliable protocol had to recover.
+₃ Did not finish inside the 60 s deadline; the row reports the truncated rate.
+₄ Too few probes returned inside the timeout to quote a percentile, which is
+itself the result: the link was too congested for a small message to complete.
 
 ## Contributions
 

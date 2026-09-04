@@ -17,6 +17,7 @@
 #ifndef ZNET_BENCH_ZNET_TUNING_H
 #define ZNET_BENCH_ZNET_TUNING_H
 
+#include "znet/detail/sys_net.h"
 #include "znet/options.h"
 #include "znet/types.h"
 

@@ -22,6 +22,8 @@ function(znet_add_benchmark name)
     # the benchmarks root, not the caller's directory, so targets defined in
     # external/ still resolve "common/harness.h".
     target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    # the harness looks the syscall counter up at run time; see common/syscount.cc
+    target_link_libraries(${name} PRIVATE ${CMAKE_DL_LIBS})
 endfunction()
 
 # znet itself, and a raw-socket floor to measure it against.
@@ -42,6 +44,15 @@ if(UNIX)
     find_package(Threads REQUIRED)
     target_link_libraries(baseline-bench PRIVATE Threads::Threads)
     add_dependencies(benchmarks baseline-bench)
+
+    # the system call counter run.sh preloads into every bench
+    add_library(syscount SHARED common/syscount.cc)
+    znet_apply_cxx_standard(syscount)
+    target_link_libraries(syscount PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(syscount PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/benchmarks"
+    )
+    add_dependencies(benchmarks syscount)
 endif()
 
 # runner script next to the binaries; see README.md

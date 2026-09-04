@@ -77,6 +77,12 @@ fi
 
 [ $# -ge 1 ] || set -- znet-bench baseline-bench fanout-bench enet-bench raknet-bench gns-bench
 
+# count system calls at the libc boundary; the harness prints them per row
+if [ -f "$DIR/libsyscount.so" ]; then
+    LD_PRELOAD="$(cd "$DIR" && pwd)/libsyscount.so"
+    export LD_PRELOAD
+fi
+
 for bin in "$@"; do
     if [ ! -x "$DIR/$bin" ]; then
         echo "-- skipping $bin (not built)"

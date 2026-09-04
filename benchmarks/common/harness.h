@@ -32,6 +32,11 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <time.h>
+#endif
+
 namespace bench {
 
 using Clock = std::chrono::steady_clock;
@@ -211,7 +216,7 @@ inline FILE* CsvFile() {
                    "delivered,seconds,msg_per_s,mib_per_s,timed_out,"
                    "rtt_count,mean_us,p50_us,p95_us,p99_us,"
                    "probes_lost,ramp_ms,steady_msg_per_s,peak_msg_per_s,"
-                   "separation\n");
+                   "separation,syscalls,cpu_us_per_msg\n");
     }
     return f;
   }();
@@ -239,6 +244,8 @@ struct CsvRow {
   double steady_msg_per_s = NAN;
   double peak_msg_per_s = NAN;
   const char* separation = "";
+  double syscalls = NAN;
+  double cpu_us_per_msg = NAN;
 };
 
 inline void EmitCsv(const CsvRow& r) {
@@ -272,17 +279,58 @@ inline void EmitCsv(const CsvRow& r) {
   num(r.ramp_ms);
   num(r.steady_msg_per_s);
   num(r.peak_msg_per_s);
-  std::fprintf(f, "%s\n", r.separation);
+  std::fprintf(f, "%s,", r.separation);
+  if (!std::isnan(r.syscalls)) {
+    std::fprintf(f, "%.0f", r.syscalls);
+  }
+  std::fputc(',', f);
+  if (!std::isnan(r.cpu_us_per_msg)) {
+    std::fprintf(f, "%.4g", r.cpu_us_per_msg);
+  }
+  std::fputc('\n', f);
   std::fflush(f);
 }
 
 // ---- measurement loops -------------------------------------------------------
+
+// the process's system call count, kept by libsyscount.so when run.sh
+// preloads it (see common/syscount.cc); null when it is not loaded
+inline unsigned long long (*SyscallCounter())() {
+#ifndef _WIN32
+  static const auto fn = reinterpret_cast<unsigned long long (*)()>(
+      dlsym(RTLD_DEFAULT, "znet_bench_syscalls"));
+  return fn;
+#else
+  return nullptr;
+#endif
+}
+
+inline unsigned long long Syscalls() {
+  const auto fn = SyscallCounter();
+  return fn ? fn() : 0;
+}
+
+// CPU time the whole process has burned, all threads summed. This is what an
+// operator pays per delivered message, so it counts a library's worker
+// threads and, for a polled one, the service loop that drives it, alike. Zero
+// where the clock is unavailable.
+inline double ProcessCpuSeconds() {
+#ifndef _WIN32
+  struct timespec ts;
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+  }
+#endif
+  return 0.0;
+}
 
 /** @brief One throughput measurement. Timing covers the measured phase only. */
 struct LoopResult {
   uint32_t delivered = 0;
   double seconds = 0.0;
   bool timed_out = false;  // hit the 60 s deadline short of the workload
+  unsigned long long syscalls = 0;  // during the measured phase, when counted
+  double cpu_seconds = 0.0;         // process CPU during the measured phase
 };
 
 inline double MsgsPerSecond(const LoopResult& r) {
@@ -326,6 +374,8 @@ LoopResult RunThroughputLoop(const Workload& w, SendOne send_one, Pump pump,
   LoopResult out;
   uint32_t sent = 0;
   uint32_t received = 0;
+  const unsigned long long syscalls_before = Syscalls();
+  const double cpu_before = ProcessCpuSeconds();
   auto start = Clock::now();
   auto deadline = start + kDeadline;
   while (received < w.messages && Clock::now() < deadline) {
@@ -338,6 +388,8 @@ LoopResult RunThroughputLoop(const Workload& w, SendOne send_one, Pump pump,
     received += pump();
   }
   out.seconds = std::chrono::duration<double>(Clock::now() - start).count();
+  out.syscalls = Syscalls() - syscalls_before;
+  out.cpu_seconds = ProcessCpuSeconds() - cpu_before;
   out.delivered = received;
   out.timed_out = received < w.messages;
   return out;
@@ -425,6 +477,12 @@ inline void AnnounceRunSettings() {
   if (CsvFile() != nullptr) {
     std::printf("  csv: appending rows to $ZNET_BENCH_CSV\n");
   }
+  if (SyscallCounter() != nullptr) {
+    std::printf("  syscalls: counted at the libc boundary (libsyscount.so)\n");
+  }
+  if (ProcessCpuSeconds() > 0.0) {
+    std::printf("  cpu: process CPU per delivered message, all threads\n");
+  }
 }
 
 // One throughput row: the median rep by msg/s, with the rep span when N > 1
@@ -451,6 +509,13 @@ inline void ReportThroughput(const char* library, const char* transport,
                               reps[i].seconds / (1024.0 * 1024.0)
                         : 0.0;
     row.timed_out = reps[i].timed_out ? 1 : 0;
+    if (SyscallCounter() != nullptr) {
+      row.syscalls = static_cast<double>(reps[i].syscalls);
+    }
+    if (reps[i].cpu_seconds > 0.0 && reps[i].delivered > 0) {
+      row.cpu_us_per_msg = reps[i].cpu_seconds * 1e6 /
+                           static_cast<double>(reps[i].delivered);
+    }
     EmitCsv(row);
   }
 
@@ -467,6 +532,17 @@ inline void ReportThroughput(const char* library, const char* transport,
                                : 0.0;
   std::printf("%-10s %-6s throughput %-6s  %8u msgs  %8.3f s  %10.0f msg/s  %8.1f MiB/s",
               library, transport, w.name, mid.delivered, mid.seconds, msgs, mib);
+  if (SyscallCounter() != nullptr) {
+    const double per_msg = mid.delivered > 0
+                               ? static_cast<double>(mid.syscalls) /
+                                     static_cast<double>(mid.delivered)
+                               : 0.0;
+    std::printf("  %6.2f sys/msg", per_msg);
+  }
+  if (mid.cpu_seconds > 0.0 && mid.delivered > 0) {
+    std::printf("  %7.2f cpu-us/msg",
+                mid.cpu_seconds * 1e6 / static_cast<double>(mid.delivered));
+  }
   if (mid.timed_out) {
     std::printf("  TIMEOUT (%u/%u in 60 s)", mid.delivered, w.messages);
   }

@@ -17,13 +17,16 @@
 //
 
 #include "common/congestion.h"
+#include "common/fanout.h"
 #include "common/harness.h"
 #include "common/impairment.h"
 
 #include <enet/enet.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -264,6 +267,95 @@ void Congestion(const bench::CongestionCase& c) {
   bench::ReportCongestionCase("enet", "ENet", c, reps, "channel");
 }
 
+// One server host broadcasting 1 KiB to N client hosts, each its own socket,
+// the same shape and cases as fanout-bench. Single-threaded: the driver
+// services the server (to flush the broadcast) and every client (to receive).
+void RunFanoutCase(const bench::FanoutCase& fc) {
+  std::vector<bench::FanoutResult> reps;
+  for (int rep = 0; rep < bench::Reps(); rep++) {
+    const std::string payload = bench::MakePayload(fc.payload);
+    const enet_uint16 port = NextPort();
+    ENetAddress address{};
+    address.host = ENET_HOST_ANY;
+    address.port = port;
+    ENetHost* server = enet_host_create(&address, fc.clients, kChannels, 0, 0);
+    if (!server) {
+      std::printf("enet       ENet   fanout     %ux%u  FAILED to create server\n",
+                  fc.clients, fc.per_client);
+      continue;
+    }
+    RaiseSocketBuffers(server);
+
+    ENetAddress to{};
+    enet_address_set_host(&to, "127.0.0.1");
+    to.port = port;
+    std::vector<ENetHost*> clients;
+    clients.reserve(fc.clients);
+    for (uint32_t i = 0; i < fc.clients; i++) {
+      ENetHost* c = enet_host_create(nullptr, 1, kChannels, 0, 0);
+      if (c) {
+        RaiseSocketBuffers(c);
+        enet_host_connect(c, &to, kChannels, 0);
+      }
+      clients.push_back(c);
+    }
+
+    // drive every host until the server has all peers and no client is still
+    // connecting
+    auto service_all = [&](uint32_t* received) {
+      ENetEvent event;
+      while (enet_host_service(server, &event, 0) > 0) {
+        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+          enet_packet_destroy(event.packet);
+        }
+      }
+      for (ENetHost* c : clients) {
+        if (!c) continue;
+        while (enet_host_service(c, &event, 0) > 0) {
+          if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+            if (received) (*received)++;
+            enet_packet_destroy(event.packet);
+          }
+        }
+      }
+    };
+    auto connect_deadline = bench::Clock::now() + std::chrono::seconds(30);
+    while (static_cast<uint32_t>(server->connectedPeers) < fc.clients &&
+           bench::Clock::now() < connect_deadline) {
+      service_all(nullptr);
+    }
+    if (static_cast<uint32_t>(server->connectedPeers) < fc.clients) {
+      std::printf("enet       ENet   fanout     %ux%u  only %u/%u connected\n",
+                  fc.clients, fc.per_client,
+                  static_cast<uint32_t>(server->connectedPeers), fc.clients);
+      for (ENetHost* c : clients) if (c) enet_host_destroy(c);
+      enet_host_destroy(server);
+      continue;
+    }
+
+    bench::FanoutResult r = bench::RunFanoutMeasured(
+        fc.clients, fc.per_client,
+        [&](uint32_t) {
+          ENetPacket* packet = enet_packet_create(payload.data(), payload.size(),
+                                                  ENET_PACKET_FLAG_RELIABLE);
+          enet_host_broadcast(server, kBulkChannel, packet);
+          return true;
+        },
+        [&]() {
+          uint32_t received = 0;
+          service_all(&received);
+          return received;
+        });
+    reps.push_back(r);
+
+    for (ENetHost* c : clients) if (c) enet_host_destroy(c);
+    enet_host_destroy(server);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  bench::ReportFanout("enet", "ENet", fc.clients, fc.per_client,
+                      bench::DefaultFanoutCases().front().payload, reps);
+}
+
 }  // namespace
 
 int main() {
@@ -279,6 +371,14 @@ int main() {
   g_impair = bench::Impairment::FromEnv();
   bench::NoteImpairment(g_impair);
   bench::AnnounceRunSettings();
+  if (std::getenv("ZNET_BENCH_FANOUT") != nullptr) {
+    bench::PrintHeader("enet", "ENet");
+    for (const auto& c : bench::DefaultFanoutCases()) {
+      RunFanoutCase(c);
+    }
+    enet_deinitialize();
+    return 0;
+  }
   bench::PrintHeader("enet", "ENet");
   for (const auto& w : bench::ImpairedThroughputWorkloads(g_impair)) {
     Throughput(w);

@@ -214,10 +214,10 @@ differently under the same impairment.
 
 ### What it showed
 
-Under loss ZDT carries several times what GNS and ENet do while holding a small
-message to a fraction of ENet's delay, which is the trade a delay-sensitive
-controller exists to make. On a clean link the same rows are less flattering,
-and that gap is an open item below. The numbers are in
+Under loss ZDT carries several times what GNS and ENet do while holding the
+probe below either, which is the trade a delay-sensitive controller exists to
+make. On a clean link its channel keeps the probe at a hundredth of a
+millisecond, beside the raw TCP floor. The numbers are in
 [Under sustained load](../README.md#under-sustained-load).
 
 ## Reading the numbers
@@ -335,37 +335,20 @@ fallback and certificate auth that nothing here exercises.
 
 ## Known gaps
 
-- Under impairment RakNet misses the 60 s deadline at 1 KiB and 8 KiB. It does
-  so steadily rather than intermittently, and the row says `TIMEOUT` rather than
-  reading as a rate, so it is a property of RakNet on a lossy link rather than a
+- Under impairment RakNet misses the 60 s deadline at 1 KiB and 8 KiB. The row
+  reports the truncated rate, a property of RakNet on a lossy link rather than a
   measurement problem.
-- **znet ZDT collapses intermittently under loss.** This is the largest caveat
-  in the table. At 5% loss and a 50 ms round trip, single measurements drop to a
-  fraction of the usual rate: across five runs the 8 KiB row spans 351..1,497
-  msg/s (4.3x), 1 KiB spans 2,292..7,048 (3.1x) and even 64 B spans 3.2x, while
-  the same cells on the clean table hold inside 1.14x. Counting the `-raw` arm
-  too, every ZDT cell lands between 2.8x and 4.3x.
-  It is per-measurement, not per-run: a run is routinely fast at one payload
-  and collapsed at the next, which rules out the machine being busy for the
-  duration. It is not the impairment being uneven either, since a collapsed and
-  a healthy measurement sit in the same run under the same qdisc. GNS is not
-  steady here either, spanning 2.7x at 1 KiB, though ENet is tighter than both
-  at 1.5x on its worst cell. Unexplained; treat the impaired medians of every
-  library as an average over regimes rather than a steady rate.
-- The 64 B column needs several runs to mean anything. Scheduler noise dominates
-  when a message costs this little. On the clean table the znet ZDT row spans
-  1.02x across five runs, but under impairment the same column spans 3.2x for
-  znet and 1.5x for ENet. Run it with `ZNET_BENCH_REPS=5` or more; the row is
-  then the median with the span printed beside it.
-- The raw TCP and raw UDP floors span 1.02-1.58x across five clean runs, the
-  1.58x being raw TCP at 1 KiB, the noisiest cell on the clean table. A bimodal
-  floor means the core list straddles two L3 domains; see Running above.
-- **RakNet delivers nothing in the back half of the 8 KiB congestion case.** It
-  bursts to a peak of ~134,000 msg/s, then its steady rate (the second half of
-  the run) is exactly zero, reproducibly, in all five runs of two separate
-  sweeps. The clean 8 KiB *throughput* row is healthy, so this is specific to a
-  sustained transfer rather than the old 4999-of-5000 stall, which has not
-  recurred since every case got its own port.
-- znet TCP cannot carry the 8KB case: `ZNET_MAX_BUFFER_SIZE` framing requires a
-  whole message to fit in one buffer. The row reports `unsupported` rather than
+- Under loss the medians still have a spread. Every library varies run to run
+  when loss and scheduling interact; read a row as its median with the span the
+  harness prints beside it, and run `ZNET_BENCH_REPS=5` or more, especially at
+  64 B where a message costs so little that scheduler noise dominates.
+- ZDT's queueing test is relative, so at a microsecond round trip the ordinary
+  cost of data in flight reads as a queue and holds the window low. It does not
+  bind on a real link and is invisible on the impaired table; see
+  `ZDTRttEstimator::IsQueueing`.
+- The raw TCP and raw UDP floors span up to ~1.5x across clean runs, widest at
+  raw TCP 1 KiB. A bimodal floor means the core list straddles two L3 domains;
+  see Running above.
+- znet TCP cannot carry the 8 KiB case: `ZNET_MAX_BUFFER_SIZE` framing needs a
+  whole message in one buffer. The row reports `unsupported` rather than
   silently skipping.
