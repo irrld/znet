@@ -98,12 +98,11 @@ TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
   ASSERT_TRUE(WaitUntil([&]() { return BothReady(at_a, at_b); }, 10000))
       << "the encrypted handshake must complete over the shared sockets";
 
-  // both ends quiet now; install the app codec and talk
+  // install the app codec and talk
   auto collector = std::make_shared<NoteCollector>();
   at_a.Session()->SetCodec(MakeNoteCodec());
   at_b.Session()->SetCodec(MakeNoteCodec());
   at_b.Session()->SetHandler(collector);
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
   auto note = std::make_shared<NotePacket>();
   note->text = "hello over the punched socket";
@@ -112,6 +111,50 @@ TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
   {
     std::lock_guard<std::mutex> lock(collector->mutex);
     EXPECT_EQ(collector->notes[0], "hello over the punched socket");
+  }
+  a.Stop();
+  b.Stop();
+}
+
+// the responder may speak from inside its ready callback, and that lands on
+// the initiator in the very pass that made it ready, before its own callback
+// installed anything: the transport keeps it until then
+TEST(P2PHost, WhatThePeerSendsFirstWaitsForTheHandler) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::HostConfig config;
+  config.bind_address = "127.0.0.1";
+  p2p::Host a{config};
+  p2p::Host b{config};
+  ASSERT_EQ(a.Start(), Result::Success);
+  ASSERT_EQ(b.Start(), Result::Success);
+
+  PunchOutcome at_a;
+  PunchOutcome at_b;
+  a.Punch(Offer({HostAddr(b)}, 9, /*is_initiator=*/true), at_a.Callback());
+  b.Punch(Offer({HostAddr(a)}, 9, /*is_initiator=*/false),
+          [&](Result result, std::shared_ptr<PeerSession> session) {
+            if (result == Result::Success) {
+              session->SetCodec(MakeNoteCodec());
+              auto note = std::make_shared<NotePacket>();
+              note->text = "first";
+              session->SendPacket(note);
+            }
+            at_b.Callback()(result, std::move(session));
+          });
+  ASSERT_TRUE(WaitUntil([&]() { return at_a.done.load() && at_b.done.load(); },
+                        12000));
+  ASSERT_EQ(at_a.result, Result::Success);
+  ASSERT_EQ(at_b.result, Result::Success);
+
+  // a takes its time; the note must not be lost to that
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  auto collector = std::make_shared<NoteCollector>();
+  at_a.Session()->SetCodec(MakeNoteCodec());
+  at_a.Session()->SetHandler(collector);
+  ASSERT_TRUE(WaitUntil([&]() { return collector->count.load() == 1; }, 5000));
+  {
+    std::lock_guard<std::mutex> lock(collector->mutex);
+    EXPECT_EQ(collector->notes[0], "first");
   }
   a.Stop();
   b.Stop();
@@ -161,7 +204,6 @@ TEST(P2PHost, ThreePeersShareOneSocketEach) {
   a_to_c.Session()->SetHandler(collector);
   b_to_a.Session()->SetCodec(MakeNoteCodec());
   c_to_a.Session()->SetCodec(MakeNoteCodec());
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
   auto from_b = std::make_shared<NotePacket>();
   from_b->text = "from b";

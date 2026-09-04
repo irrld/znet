@@ -640,9 +640,10 @@ TEST(ByteMetrics, WireAndPayloadAreCountedSeparately) {
   EXPECT_EQ(body_in, body_out) << "received payload bytes must match what was serialized";
 }
 
-// Without a codec nothing can be dispatched, but the bytes still arrived, and a
-// bandwidth counter that hides them is worse than useless.
-TEST(ByteMetrics, WireBytesAreCountedWithoutACodec) {
+// Without a handler nothing is pulled: the frame waits in the transport,
+// uncounted, and lands on the first pass after a handler exists. This is what
+// lets a peer speak the moment it is ready, before this side's connect event.
+TEST(ByteMetrics, NothingIsPulledWithoutAHandler) {
   ASSERT_EQ(Init(), Result::Success);
   Pair pair(/*encryption=*/true);
   ASSERT_TRUE(pair.Handshake());
@@ -651,10 +652,16 @@ TEST(ByteMetrics, WireBytesAreCountedWithoutACodec) {
   pair.server->SetHandler(nullptr);
   const auto before = pair.server->metrics().common;
   pair.Deliver(frame);
-  const auto after = pair.server->metrics().common;
+  const auto waiting = pair.server->metrics().common;
+  EXPECT_EQ(waiting.message_bytes_received, before.message_bytes_received)
+      << "still in the transport, so not received yet";
+  EXPECT_TRUE(pair.server_got.empty());
 
-  EXPECT_GT(after.message_bytes_received, before.message_bytes_received)
-      << "wire bytes are counted even when nothing dispatches them";
-  EXPECT_EQ(after.payload_bytes_received, before.payload_bytes_received)
-      << "payload bytes only count what reached a handler";
+  pair.server->SetHandler(std::make_shared<CollectHandler>(&pair.server_got));
+  pair.server->Process();
+  const auto after = pair.server->metrics().common;
+  EXPECT_GT(after.message_bytes_received, before.message_bytes_received);
+  EXPECT_GT(after.payload_bytes_received, before.payload_bytes_received);
+  ASSERT_EQ(pair.server_got.size(), 1u);
+  EXPECT_EQ(pair.server_got[0], 9u);
 }

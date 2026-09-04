@@ -151,8 +151,8 @@ class PeerSession {
 
   /**
    * @brief Installs the codec that frames and identifies this session's
-   *        packets. Set it in the connect event, before the first packet
-   *        arrives; it belongs to the worker thread after that.
+   *        packets. Set it in the connect event; it belongs to the
+   *        session's thread after that.
    */
   void SetCodec(std::shared_ptr<Codec> codec) {
     pipeline_.SetCodec(std::move(codec));
@@ -162,6 +162,9 @@ class PeerSession {
    * @brief Installs the handler dispatched for every decoded packet. Same
    *        contract as SetCodec(): set it in the connect event. See
    *        ReleaseHandler() for the ownership cycle this creates.
+   *
+   * Nothing the peer sends before both are installed is lost: the session
+   * leaves it in the transport, in order, until then.
    */
   void SetHandler(std::shared_ptr<PacketHandlerBase> handler) {
     handler_ = std::move(handler);

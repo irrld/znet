@@ -574,7 +574,6 @@ TEST(RelayedPunch, ConnectsThroughTheRelayWhenDirectFails) {
   at_a.Session()->SetHandler(to_a);
   at_b.Session()->SetCodec(MakeNoteCodec());
   at_b.Session()->SetHandler(to_b);
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   ExchangeNote(at_a.Session(), to_b, "through the relay");
   ExchangeNote(at_b.Session(), to_a, "and back");
   const p2p::RelayMetrics metrics = fx.relay->metrics();
@@ -638,7 +637,6 @@ TEST(RelayedPunch, OneHostCarriesTwoRelayedPeers) {
   b_to_a.Session()->SetHandler(at_b);
   c_to_a.Session()->SetCodec(MakeNoteCodec());
   c_to_a.Session()->SetHandler(at_c);
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   ExchangeNote(a_to_b.Session(), at_b, "for b");
   ExchangeNote(a_to_c.Session(), at_c, "for c");
   EXPECT_EQ(at_b->count.load(), 1) << "nothing meant for c reached b";

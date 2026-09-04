@@ -92,6 +92,14 @@ bool PeerSession::Process() {
   // session from starving the others sharing this worker.
   std::shared_ptr<Buffer> buffer;
   for (uint32_t i = 0; i < kMaxReceivesPerProcess; i++) {
+    // nothing is pulled without somewhere to put it. The handshake finishing
+    // clears its own codec and handler, and whatever the peer sent right
+    // behind it stays in the transport, in order, until the connect event
+    // installs the application's; so the peer may speak the moment it is
+    // ready, whoever fires that event and whenever.
+    if (!handler_ || !pipeline_.has_codec()) {
+      break;
+    }
     buffer = transport_layer_->Receive();
     if (!buffer) {
       break;
@@ -102,22 +110,20 @@ bool PeerSession::Process() {
     if (!buffer) {
       continue;
     }
-    if (handler_ && pipeline_.has_codec()) {
-      ZNET_METRIC(metrics_.common.messages_received++);
-      ZNET_METRIC(metrics_.common.payload_bytes_received += buffer->readable_bytes());
-      DecodeStats stats = pipeline_.Dispatch(buffer, *handler_);
-      if (stats.invalid_frames > 0) {
-        invalid_frames_ += stats.invalid_frames;
-        ZNET_METRIC(metrics_.common.invalid_frames += stats.invalid_frames);
-        const uint32_t limit = options_.common.max_invalid_frames;
-        if (limit != 0 && invalid_frames_ >= limit) {
-          ZNET_LOG_WARN("Session {} reached {} undecodable frames, closing.",
-                        id_, invalid_frames_);
-          CloseOptions close_options;
-          close_options.Set<NoLingerKey>(true);
-          Close(close_options);
-          break;
-        }
+    ZNET_METRIC(metrics_.common.messages_received++);
+    ZNET_METRIC(metrics_.common.payload_bytes_received += buffer->readable_bytes());
+    DecodeStats stats = pipeline_.Dispatch(buffer, *handler_);
+    if (stats.invalid_frames > 0) {
+      invalid_frames_ += stats.invalid_frames;
+      ZNET_METRIC(metrics_.common.invalid_frames += stats.invalid_frames);
+      const uint32_t limit = options_.common.max_invalid_frames;
+      if (limit != 0 && invalid_frames_ >= limit) {
+        ZNET_LOG_WARN("Session {} reached {} undecodable frames, closing.",
+                      id_, invalid_frames_);
+        CloseOptions close_options;
+        close_options.Set<NoLingerKey>(true);
+        Close(close_options);
+        break;
       }
     }
   }
