@@ -523,7 +523,7 @@ class Buffer {
   void WriteNumber(T c) {
     char* pt = reinterpret_cast<char*>(&c);
     size_t size = sizeof(c);
-    ReserveIncremental(size);
+    if (ZNET_UNLIKELY(!ReserveIncremental(size))) ZNET_UNLIKELY_ATTR { return; }
     // likely, most systems use native endianness
     if (ZNET_LIKELY(GetSystemEndianness() == endianness_)) ZNET_LIKELY_ATTR {
       for (size_t i = 0; i < size; i++) {
@@ -588,7 +588,9 @@ class Buffer {
   void Write(const T* arr, size_t size) {
     auto* pt = reinterpret_cast<const char*>(arr);
     size_t calculated_size = sizeof(T) * size;
-    ReserveIncremental(calculated_size);
+    if (ZNET_UNLIKELY(!ReserveIncremental(calculated_size))) ZNET_UNLIKELY_ATTR {
+      return;
+    }
     std::memcpy(data_ + write_cursor_, pt, calculated_size);
     write_cursor_ += calculated_size;
   }
@@ -608,7 +610,9 @@ class Buffer {
         actual_size = i + 1;
       }
     }
-    ReserveIncremental(actual_size + 1);
+    if (ZNET_UNLIKELY(!ReserveIncremental(actual_size + 1))) ZNET_UNLIKELY_ATTR {
+      return;
+    }
     WriteUnsignedChar(actual_size);
     // likely, most systems use native endianness
     if (ZNET_LIKELY(GetSystemEndianness() == endianness_)) ZNET_LIKELY_ATTR {
@@ -837,7 +841,7 @@ class Buffer {
   }
 
   void SkipWrite(size_t size) {
-    ReserveIncremental(size);
+    if (ZNET_UNLIKELY(!ReserveIncremental(size))) ZNET_UNLIKELY_ATTR { return; }
     write_cursor_ += size;
   }
 
@@ -850,16 +854,21 @@ class Buffer {
     return error;
   }
 
-  void ReserveIncremental(size_t additional_bytes) {
-    Reserve(write_cursor_ + additional_bytes);
+  // false when the reservation could not be met; last_error_ is set and the
+  // buffer is left as it was. raw writers check this before touching data_.
+  bool ReserveIncremental(size_t additional_bytes) {
+    return Reserve(write_cursor_ + additional_bytes);
   }
 
-  void ReserveExact(size_t size) { Reserve(size, true); }
+  bool ReserveExact(size_t size) { return Reserve(size, true); }
 
-  void Reserve(size_t size, bool exact = false) {
+  bool Reserve(size_t size, bool exact = false) {
     // growth floor: doubling from the requested size alone makes a buffer
     // filled a few bytes at a time crawl through 2, 6, 14... byte
     // reallocations, one per write. exact reservations are left exact.
+    // a failed allocation reports failure at the grown size rather than
+    // retrying the exact ask; if the rounded-up size cannot be found, the
+    // few bytes actually requested are not worth chasing under that pressure.
     constexpr size_t kMinGrowth = 64;
     if (ZNET_UNLIKELY(!data_)) ZNET_UNLIKELY_ATTR {
       size_t target_size;
@@ -874,17 +883,17 @@ class Buffer {
       data_ = new (std::nothrow) char[target_size];
       if (ZNET_UNLIKELY(!data_)) ZNET_UNLIKELY_ATTR {
         last_error_ = BufferError::CannotAllocate;
-        return;
+        return false;
       }
       allocated_size_ = target_size;
 #ifdef ZNET_BUFFER_COUNT_MEMORY_ALLOCATIONS
       mem_allocations_++;
 #endif
-      return;
+      return true;
     }
     // most Reserve calls don't need to reallocate
     if (ZNET_LIKELY(allocated_size_ >= size)) ZNET_LIKELY_ATTR {
-      return;
+      return true;
     }
     size_t target_size_ = size * 2;
     if (target_size_ < kMinGrowth) {
@@ -893,7 +902,7 @@ class Buffer {
     char* tmp_data = new (std::nothrow) char[target_size_];
     if (ZNET_UNLIKELY(!tmp_data)) ZNET_UNLIKELY_ATTR {
       last_error_ = BufferError::CannotAllocate;
-      return;
+      return false;
     }
     allocated_size_ = target_size_;
     std::memcpy(tmp_data, data_, write_cursor_);
@@ -902,6 +911,7 @@ class Buffer {
 #ifdef ZNET_BUFFER_COUNT_MEMORY_ALLOCATIONS
     mem_allocations_++;
 #endif
+    return true;
   }
 
  private:
