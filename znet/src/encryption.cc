@@ -18,20 +18,6 @@
 
 namespace znet {
 
-/*void print_hex(const unsigned char* data, size_t length) {
-  for (size_t i = 0; i < length; ++i) {
-    std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]);
-    if (i < length - 1) std::cout << ":";
-    if ((i + 1) % 16 == 0 && i != 0 && i < length - 1) std::cout << "\n";
-  }
-  std::cout << std::dec << std::endl; // Switch back to decimal for any further numbers
-}
-
-void print_key(EVP_PKEY* key) {
-  BIO* fp = BIO_new_fp(stdout, BIO_NOCLOSE);
-  EVP_PKEY_print_public(fp, key, 0, NULL);
-}*/
-
 unsigned char* SerializePublicKey(EVP_PKEY* pkey, uint32_t* len) {
   if (!pkey || !len) {
     return nullptr;
@@ -134,7 +120,6 @@ UniquePKey GenerateKey() {
   EVP_PKEY_CTX_free(kctx);
   EVP_PKEY_free(params);
 
-  //print_key(dhkey);
   return UniquePKey(dhkey);
 }
 
@@ -644,8 +629,7 @@ std::shared_ptr<Buffer> EncryptionLayer::HandleDecrypt(
   BuildNonce(rx_salt_, stream, counter, nonce);
 
   // GCM's plaintext is at most cipher_len, so the returned buffer is laid out
-  // up front and decrypted straight into place; the scratch vector this used
-  // to fill was a second allocation and a full copy on every message.
+  // up front and decrypted straight into place
   auto out = std::make_shared<Buffer>();
   out->ReserveExact(static_cast<size_t>(cipher_len));
   if (!dec_ctx_) {
@@ -696,11 +680,9 @@ std::shared_ptr<Buffer> EncryptionLayer::HandleOut(
   int buffer_len = static_cast<int>(buffer->readable_bytes());
   if (enable_encryption_) {
     std::shared_ptr<Buffer> new_buffer = std::make_shared<Buffer>();
-    // GCM is a stream cipher: the ciphertext is exactly as long as the input.
-    // The output is laid out up front and encrypted straight into place; the
-    // scratch ciphertext vector this used to build was a second allocation
-    // and a full copy on every message. The two front bytes let the TCP
-    // transport frame in place afterwards.
+    // GCM is a stream cipher: the ciphertext is exactly as long as the input,
+    // so the output is laid out up front and encrypted straight into place.
+    // The two front bytes let the TCP transport frame in place afterwards.
     new_buffer->ReserveHeadroom(2);
     new_buffer->ReserveExact(2 + 1 + kHeaderLen +
                              static_cast<size_t>(buffer_len) + kTagLen);

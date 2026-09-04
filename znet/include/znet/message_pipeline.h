@@ -13,11 +13,9 @@
 // Internal: a private member of PeerSession, public only because that member
 // needs the complete type. Nothing here is meant to be called directly.
 //
-// The transformation between packets and wire bytes, in one place and in both
-// directions. It used to live in two: the outbound half inside the session's
-// send function and the inbound half inline in its tick loop, which meant the
-// two orderings had to be kept mirror images of each other by reading them side
-// by side. They are each other's inverse, so they belong together.
+// The transformation between packets and wire bytes, in both directions in
+// one place: the two orderings are each other's inverse, so they are kept
+// side by side.
 //
 
 #ifndef ZNET_MESSAGE_PIPELINE_H_

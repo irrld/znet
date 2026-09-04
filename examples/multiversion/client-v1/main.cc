@@ -89,41 +89,27 @@ int main() {
     return 1;
   }
 
-  // Create a client configuration
-  // We're connecting to localhost (127.0.0.1) on port 25000
-  // In a real application, you'd typically get these values from
-  // command line arguments or a config file or from ui
+  // localhost here; a real application takes these from its own config.
   ClientConfig config{"localhost", 25000};
 
-  // Initialize the network client with our configuration
-  // This sets up the internal client state but doesn't connect yet
   Client client{config};
 
-  // Register our event handler to process network events
-  // OnEvent will be called for events.
   client.SetEventCallback(ZNET_BIND_GLOBAL_FN(OnEvent));
 
-  // Try to bind the client to a local network interface
-  // This is required before we can connect to the server
   if ((result = client.Bind()) != Result::Success) {
     ZNET_LOG_ERROR("Failed to bind: {}", GetResultString(result));
     return 1;
   }
 
-  // Attempt to establish a connection to the server
-  // This initiates the connection process but doesn't wait. (async)
-  // It runs on another thread
+  // returns at once; the client runs on its own thread
   if ((result = client.Connect()) != Result::Success) {
     ZNET_LOG_ERROR("Failed to connect: {}", GetResultString(result));
     return 1;
   }
 
-  // Wait for the connection to complete
-  // Note: In a real application, you typically wouldn't block here
-  // Instead, you'd continue your program and do other stuff
+  // a real application would go on with its own work instead of waiting
   client.Wait();
 
-  // Connection is finished (disconnected)
   znet::Cleanup();
   return 0;
 }

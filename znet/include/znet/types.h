@@ -22,7 +22,7 @@ namespace znet {
 
 /** @brief Largest single send or receive, in bytes. */
 #ifndef ZNET_MAX_BUFFER_SIZE
-#define ZNET_MAX_BUFFER_SIZE 4096 //16384
+#define ZNET_MAX_BUFFER_SIZE 4096
 #endif
 
 // 64 bits might be an overkill here but meh

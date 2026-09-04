@@ -222,7 +222,6 @@ size_t Server::ActiveSessionCount() const {
 
 void Server::CleanupAndProcessSessions(SessionMap& sessions) {
   std::vector<std::shared_ptr<InetAddress>> remove;
-  // cleanup dead sessions
   for (auto&& item : sessions) {
     if (item.second->IsAlive()) {
       continue;
@@ -272,10 +271,8 @@ void Server::PromoteReady(std::shared_ptr<PeerSession> session) {
 }
 
 void Server::ProcessSessions() {
-  // cleanup and process pending sessions
   CleanupAndProcessSessions(pending_sessions_);
 
-  // process pending connections and promote them
   std::vector<decltype(pending_sessions_)::key_type> promote;
   for (auto&& item : pending_sessions_) {
     if (!item.second->IsReady()) {
@@ -290,9 +287,7 @@ void Server::ProcessSessions() {
 
   for (auto&& address : promote) {
     auto session = pending_sessions_[address];
-    // promote to connected
     PromoteReady(session);
-    // erase pending
     pending_sessions_.erase(address);
   }
 }

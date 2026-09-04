@@ -96,8 +96,7 @@ Result Client::Connect() {
     auto rest_of_tick = [this, paced, &lock]() {
       if (!paced) {
         // this loop is the only reader, so block on the socket itself: it
-        // returns the moment data lands. The old hot spin had the same
-        // latency and a whole core's worth of cost.
+        // returns the moment data lands, without spinning a core
         backend_->WaitReadable(std::chrono::milliseconds(10));
         return;
       }

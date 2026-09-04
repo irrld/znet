@@ -12,7 +12,7 @@
 // channels (reliable/unreliable x ordered/unordered), a RakNet-style versioned
 // and spoof-resistant handshake, fragmentation and keepalive. It slots in below
 // the existing send/recv pipeline as a TransportLayer, so encryption, compression
-// and serialization are unchanged. See docs/zdt-design.md for the full spec.
+// and serialization are unchanged. See the wiki's Choosing a Transport page.
 //
 // API stability: internal (see the wiki, API Stability)
 

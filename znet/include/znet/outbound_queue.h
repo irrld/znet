@@ -13,8 +13,7 @@
 // The hand-off between whoever sends a packet and whoever encodes it. Three
 // things that only make sense together: the queue itself, the claim that keeps
 // exactly one thread encoding at a time, and the rule deciding which thread
-// should take it. They used to sit loose on the session, which is how two
-// threads came to race for the claim with nothing choosing between them.
+// should take it.
 //
 
 #ifndef ZNET_OUTBOUND_QUEUE_H_

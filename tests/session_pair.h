@@ -9,10 +9,9 @@
 //
 
 //
-// Two real PeerSessions joined by a hand-pumped fake wire. Grew up in the
-// encryption tests and is shared by anything that needs a session pair without
-// sockets: the test moves frames between the ends itself, in whatever order
-// and shape it wants to model.
+// Two real PeerSessions joined by a hand-pumped fake wire, for anything that
+// needs a session pair without sockets: the test moves frames between the ends
+// itself, in whatever order and shape it wants to model.
 //
 
 #pragma once
@@ -34,8 +33,7 @@ using namespace znet;
 
 
 // A transport that goes nowhere: Send() parks the encoded frame, Receive()
-// hands back whatever the test put in the inbox. The test moves frames between
-// the two ends itself, in whatever order it wants to model.
+// hands back whatever the test put in the inbox.
 class FakeTransport : public TransportLayer {
  public:
   struct Frame {

@@ -328,21 +328,6 @@ Result TCPTransportLayer::Close(CloseOptions options) {
   return Result::Success;
 }
 
-/*uint64_t TCPTransportLayer::GetRTT() const {
-#ifndef ZNET_TARGET_WIN
-  struct tcp_info ti{};
-  socklen_t len = sizeof(ti);
-  if (getsockopt(socket_, IPPROTO_TCP, TCP_INFO, &ti, &len) == 0) {
-    return ti.tcpi_rtt;
-  } else {
-    ZNET_LOG_ERROR("getsockopt TCP_INFO failed: {}", strerror(errno));
-    return 0;
-  }
-#else
-  return 0;
-#endif
-}*/
-
 TCPClientBackend::TCPClientBackend(std::shared_ptr<InetAddress> server_address,
                                    const SessionOptions& options)
     : options_(options), server_address_(server_address) {
@@ -515,9 +500,8 @@ Result TCPServerBackend::Bind() {
     return Result::CannotCreateSocket;
   }
   if (!is_unix && server_options_.reuse_address) {
-    // one call per option: option names are not flags to OR together, and the
-    // old combined value named a different option entirely. int-sized, as a
-    // 1-byte optlen is EINVAL on Linux.
+    // one call per option: option names are not flags to OR together.
+    // int-sized, as a 1-byte optlen is EINVAL on Linux.
     const int option = 1;
     setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR,
                reinterpret_cast<const char*>(&option), sizeof(option));
@@ -648,7 +632,6 @@ Result TCPServerBackend::Close() {
   if (!is_listening_) {
     return Result::AlreadyStopped;
   }
-  // Close the server
   if (!CloseSocket(server_socket_)) {
     ZNET_LOG_DEBUG("Failed to close socket: {}, {}",
                    bind_address_->readable(), GetLastErrorInfo());

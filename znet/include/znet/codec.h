@@ -46,15 +46,10 @@ class Codec {
   ~Codec() = default;
 
   /**
-   * @brief Deserializes packets from a buffer and handles them using the provided handler.
+   * @brief Decodes every frame in `buffer` with the serializer its id names
+   *        and hands each packet to `handler`. A frame with no serializer, a
+   *        failed deserialize or a size mismatch is logged and skipped.
    *
-   * Processes a binary buffer by reading packet IDs, sizes, and payloads. Uses the appropriate
-   * serializer based on the packet ID to deserialize the packet. Deserialized packets are
-   * passed to the given packet handler. Logs warnings for issues such as missing serializers,
-   * deserialization failures, or size mismatches.
-   *
-   * @param buffer A shared pointer to the buffer containing packet data.
-   * @param handler Reference to the packet handler responsible for processing deserialized packets.
    * @param dump_on_failure Log a bounded hex dump of the buffer at the first
    *        frame in it that fails to decode.
    * @return What failed to decode, for the caller to count; the codec itself
@@ -65,13 +60,8 @@ class Codec {
                           bool dump_on_failure = false);
 
   /**
-   * @brief Serializes a packet into a binary buffer.
+   * @brief Frames one packet: its id, its size and the serializer's bytes.
    *
-   * This function retrieves the appropriate serializer for the packet
-   * based on its ID, writes the packet ID, and serializes the packet
-   * into a binary buffer. Ensures the serialized size is properly recorded.
-   *
-   * @param packet A shared pointer to the packet to be serialized.
    * @param headroom Bytes to leave in front of the payload, for stages that
    *        prepend a header afterwards. See Buffer::ReserveHeadroom.
    * @return A shared pointer to the resulting serialized buffer.

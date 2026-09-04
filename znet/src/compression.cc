@@ -123,8 +123,7 @@ struct CompressionCodec<CompressionType::Zstandard> {
     if (!compressed) {
       return nullptr;
     }
-    // CompressZstd left front room, so the type byte goes in place; this
-    // used to be a whole second buffer and a copy of the ciphertext-to-be
+    // CompressZstd left front room, so the type byte goes in place
     if (!compressed->PrependInt8(GetCompressionTypeRaw(type()))) {
       return nullptr;
     }

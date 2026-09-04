@@ -97,8 +97,6 @@ struct LoginPacketHandler
 
 std::vector<std::shared_ptr<Player>> active_players_;
 
-// Called whenever a new client connects to the server
-// Sets up the communication channel with proper encoding and handling
 bool OnNewSessionEvent(IncomingClientConnectedEvent& event) {
   PeerSession& session = *event.session();
 
@@ -125,11 +123,8 @@ bool OnDisconnectSessionEvent(znet::IncomingClientDisconnectedEvent& event) {
   return false;
 }
 
-// Central event dispatcher that routes all server events
-// to their appropriate handler functions
 void OnEvent(Event& event) {
   EventDispatcher dispatcher{event};
-  // Route for different types of events
   dispatcher.Dispatch<IncomingClientConnectedEvent>(
       ZNET_BIND_GLOBAL_FN(OnNewSessionEvent));
   dispatcher.Dispatch<IncomingClientDisconnectedEvent>(
@@ -144,50 +139,33 @@ int main() {
     return 1;
   }
 
-  // Create the server configuration
-  // We're listening on localhost (127.0.0.1) port 25000
-  // In a real application, you'd typically get these values from
-  // command line arguments or a config file or from ui
+  // localhost here; a real application takes these from its own config.
   ServerConfig config{"localhost", 25000};
 
-  // Initialize the server with our configuration
-  // This sets up the internal server state but doesn't start listening yet
   Server server{config};
 
-  // Set up signal handling for graceful shutdown
-  // This ensures the server closes cleanly when interrupted (Ctrl+C)
-  // This part is optional
+  // optional: stop cleanly on Ctrl+C
   RegisterSignalHandler([&server](Signal sig) -> bool {
-    // stop the server when SIGINT is received
     server.Stop();
     return server.shutdown_complete();
   }, znet::kSignalInterrupt);
 
-  // Register our event handler to process server events
-  // OnEvent will be called for client connections, disconnections,
-  // and other server events
   server.SetEventCallback(ZNET_BIND_GLOBAL_FN(OnEvent));
 
-  // Try to bind the server to the configured network interface
-  // This reserves the port for our use
   if ((result = server.Bind()) != Result::Success) {
     ZNET_LOG_ERROR("Failed to bind: {}", GetResultString(result));
     return 1;
   }
 
-  // Start listening for incoming client connections
-  // This begins accepting clients but doesn't block the main thread (async)
+  // returns at once; the server runs on its own thread
   if ((result = server.Listen()) != Result::Success) {
     ZNET_LOG_ERROR("Failed to listen: {}", GetResultString(result));
     return 1;
   }
 
-  // Wait for the server to stop
-  // Note: In a real application, you typically wouldn't block here
-  // Instead, you'd continue your program and do other stuff
+  // a real application would go on with its own work instead of waiting
   server.Wait();
 
-  // Server has shut down cleanly
   znet::Cleanup();
   return 0;
 }

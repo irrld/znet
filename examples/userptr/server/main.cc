@@ -60,9 +60,7 @@ class MyPacketHandler
       : session_(std::move(session)) {}
 
   void OnPacket(std::shared_ptr<HelloPacket> packet) {
-    // The state was attached before this handler could ever run, so it is
-    // here. It is still worth checking if the given pointer is null because
-    // it would lead to a crash. Better safe than sorry.
+    // attached before this handler could run; the check is cheap insurance
     std::shared_ptr<ClientState> state = session_->user_pointer<ClientState>();
     if (!state) {
       ZNET_LOG_ERROR("Session {} has no ClientState attached!", session_->id());

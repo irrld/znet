@@ -47,9 +47,8 @@ struct ClientConfig {
 };
 
 /**
- * @brief Network client for managing connections and communication to a server.
- *
- * Handles client lifecycle, connecting, disconnecting, and network operations within an event-driven framework.
+ * @brief Connects to one server and drives that session on a thread of its
+ *        own, reporting through the event callback.
  */
 class Client : public Interface {
  public:
@@ -57,15 +56,8 @@ class Client : public Interface {
   Client(const Client&) = delete;
   ~Client() override;
 
-  /**
-   * @brief Binds client to configured IP address and port. This function is not thread-safe.
-   *
-   * @return Result::Success if binding is successful
-   * @return Result::InvalidAddress if IP address is invalid
-   * @return Result::CannotCreateSocket if socket creation fails
-   * @return Result::CannotBind if binding to address:port fails
-   * @return Result::Failure if setup process fails
-   */
+  /** @brief Binds a local socket for the connection. Not thread-safe.
+   *         InvalidAddress, CannotCreateSocket or CannotBind say what failed. */
   Result Bind() override;
 
   /**
@@ -85,34 +77,16 @@ class Client : public Interface {
    */
   void SetTicksPerSecond(uint16_t tps) { scheduler_.SetTicksPerSecond(tps); }
 
-  /**
-   * @brief Establishes connection to the specified server address. This function is not thread-safe.
-   *
-   * @return Result::Success if the connection is successfully established.
-   * @return Result::AlreadyConnected if a connection is already active.
-   * @return Result::InvalidRemoteAddress if the server address is invalid.
-   * @return Result::Failure if the connection attempt fails.
-   */
+  /** @brief Starts connecting on a thread of its own and returns at once;
+   *         the outcome arrives as an event. Not thread-safe.
+   *         AlreadyConnected or InvalidRemoteAddress say why it did not start. */
   Result Connect();
 
-  /**
-   * @brief Terminates the connection. This function is not thread-safe.
-   *
-   * @return Result::Success if the disconnection is successful.
-   * @return Result::Failure if no active session exists or disconnection fails.
-   */
+  /** @brief Closes the session. Not thread-safe. Failure when there is none. */
   Result Disconnect(CloseOptions options = {});
 
-  /**
-   * @brief Waits for the completion of the client's thread. This function is thread-safe.
-   *
-   * This method blocks the calling thread until the client's internal thread,
-   * which handles network operations and session management, has completed (disconnected).
-   *
-   * Typically used during client shutdown or when there is a need to
-   * synchronize the caller with the client's task execution.
-   *
-   */
+  /** @brief Blocks until the client's thread has finished, which is once the
+   *         session is gone. Thread-safe. */
   void Wait() override;
 
   /**

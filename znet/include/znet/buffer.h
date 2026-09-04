@@ -43,8 +43,8 @@ class Buffer;
 // type constraints.
 //
 // each one exists twice: as a trait usable in any language mode, and (on
-// C++20) as the concept of the same name that the public API used before
-// C++14 support was added. the ZNET_TPL_* macros below pick whichever the
+// C++20) as the concept of the same name. the ZNET_TPL_* macros below pick
+// whichever the
 // compiler understands, so a C++20 build still gets concept diagnostics and a
 // C++14 build gets the equivalent SFINAE constraint.
 namespace detail {

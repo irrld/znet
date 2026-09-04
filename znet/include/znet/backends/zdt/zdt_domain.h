@@ -10,11 +10,9 @@
 // API stability: internal (see the wiki, API Stability)
 
 //
-// A debug-only check that a group of methods is never entered by two threads at
-// once. ZDT's threading rules were written as comments, which is how a race in
-// the session's encode path survived long enough to show up as a bimodal
-// benchmark rather than as a failure. These turn the rules into something that
-// aborts instead.
+// A debug-only check that a group of methods is never entered by two threads
+// at once: ZDT's threading rules, enforced with an abort rather than stated in
+// a comment.
 //
 
 #ifndef ZNET_BACKENDS_ZDT_ZDT_DOMAIN_H_

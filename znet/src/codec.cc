@@ -126,8 +126,7 @@ std::shared_ptr<Buffer> Codec::Serialize(std::shared_ptr<Packet> packet,
     buffer->ReserveHeadroom(headroom);
   }
   buffer->WriteVarInt(packet->id());
-  // four bytes, not size_t: a frame is bounded far below 4 GiB and the old
-  // eight-byte field was pure overhead on every message
+  // four bytes: a frame is bounded far below 4 GiB
   buffer->WriteInt<uint32_t>(0);  // length placeholder, backfilled below
   const size_t write_cursor = buffer->write_cursor();
   const Buffer* framed = buffer.get();

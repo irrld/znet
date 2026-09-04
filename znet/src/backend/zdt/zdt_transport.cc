@@ -587,19 +587,6 @@ int ZDTTransportLayer::SendWindow() const {
   return congestion_.Window(SendWindowCap());
 }
 
-// the congestion signal is queueing delay, not loss. Reno-style halving on
-// every drop settles at a window of ~1.2/sqrt(loss), six datagrams at 5%,
-// which collapses throughput on a link that is lossy rather than congested.
-// A full queue raises the round trip; a corrupted radio frame does not.
-// Both congestion paths ask the same question, so they ask it in one place.
-//
-// A purely relative test is known to be wrong at the bottom of the range: at
-// the few microseconds of a loopback or same-rack round trip, 1.25x is a margin
-// under a microsecond, so the ordinary cost of keeping data in flight reads as
-// congestion and the window sits at its floor on a path with no queue at all.
-// Adding an absolute margin does open the window there, and is worth 18-65% at
-// 1 KiB and above, but it costs ~30% at 64 B and makes that case bimodal, so it
-// is not simply a better rule. See benchmarks/README.md.
 void ZDTTransportLayer::OnNak(WireSeq packet_seq) {
   auto it = sent_packets_.find(packet_seq);
   if (it == sent_packets_.end()) {

@@ -414,8 +414,7 @@ static CommonOptions QuietCommon() {
   return common;
 }
 
-// Zero means disabled, per the CommonOptions contract. It used to mean
-// "expired before the first tick", which closed the connection instantly.
+// Zero means disabled, per the CommonOptions contract.
 TEST(ZDTTimers, ZeroDisablesIdleAndKeepalive) {
   ASSERT_EQ(Init(), Result::Success);
   auto socket = OpenBoundSocket();
@@ -901,8 +900,8 @@ TEST(ZDTReliability, BulkBacklogDoesNotDelayAnotherChannel) {
   }
 
   ASSERT_TRUE(probe_received) << "the probe never arrived";
-  // the sharp end: with one FIFO the probe left after the whole backlog, so
-  // this counted every bulk message. lanes put it in the first window.
+  // the sharp end: the probe rides in the first window, not behind the
+  // whole backlog
   EXPECT_LT(bulk_before_probe, kBulk / 4)
       << "the probe waited behind the bulk transfer's backlog";
   // and the lanes must not have cost the bulk anything
@@ -914,9 +913,9 @@ TEST(ZDTReliability, BulkBacklogDoesNotDelayAnotherChannel) {
 
 // A lost burst tail is invisible to the NAK path: nothing arrives after it, so
 // the receiver cannot see a gap to report, and the sender's window may be shut
-// so it cannot expose one by sending new data. Before the tail-loss probe the
-// only way out was the full RTO floor (100 ms by default); the probe resends
-// after ~10 ms of ack silence, so recovery must land well under that floor.
+// so it cannot expose one by sending new data. The tail-loss probe resends
+// after ~10 ms of ack silence, so recovery must land well under the 100 ms
+// RTO floor.
 TEST(ZDTReliability, TailLossRecoversBeforeTheRtoFloor) {
   ASSERT_EQ(Init(), Result::Success);
 

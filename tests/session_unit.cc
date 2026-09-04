@@ -12,10 +12,7 @@
 // Socket-free tests for the session's send-path plumbing: the lock-free queue
 // underneath it, the arbitration built on top, and the codec's framing in both
 // directions, including what the decode side counts against a misbehaving
-// peer. All are reachable only through a live connection otherwise, which is
-// why the race that made throughput bimodal showed up as a benchmark artifact
-// rather than a failure, and why a serializer breaking the frame header went
-// unnoticed.
+// peer. All are reachable only through a live connection otherwise.
 //
 
 #include "session_pair.h"
@@ -120,7 +117,7 @@ TEST(MpscQueueTest, MovesOutOfTheSlotSoResourcesAreReleased) {
       << "the slot must not keep a copy alive until it is written a lap later";
 }
 
-// The structure the whole send path rests on, and previously untested.
+// The structure the whole send path rests on.
 TEST(MpscQueueTest, ManyProducersLoseNothing) {
   constexpr int kThreads = 4;
   constexpr int kPer = 2000;
@@ -236,7 +233,7 @@ TEST(OutboundQueueTest, ClaimIsExclusiveAndNonBlocking) {
   EXPECT_FALSE(reentered_ran) << "and must not encode anything";
 }
 
-// --- the policy that fixed the bimodal throughput -----------------------------
+// --- who encodes: the claim and its policy -----------------------------------
 
 TEST(OutboundQueuePolicyTest, WithoutAnEncoderTheWorkerAlwaysEncodes) {
   OutboundQueue q(64);

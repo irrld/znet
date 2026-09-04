@@ -235,10 +235,9 @@ PortNumber FreeTcpPortLocal() {
 
 }  // namespace
 
-// the regression this pins: inbound TCP used to sit until a server worker's
-// next 120 tps tick, an ~8 ms floor on every round trip. With the poll wake,
-// a loopback ping-pong is microseconds.
-TEST(TCPLatency, RoundTripBeatsTheOldTickFloor) {
+// inbound TCP wakes the worker on arrival rather than waiting for its next
+// 120 tps tick, so a loopback ping-pong is microseconds, not ~8 ms
+TEST(TCPLatency, RoundTripDoesNotWaitForTheTick) {
   ASSERT_EQ(Init(), Result::Success);
   const PortNumber port = FreeTcpPortLocal();
   ASSERT_NE(port, 0);
@@ -322,7 +321,7 @@ TEST(TCPLatency, RoundTripBeatsTheOldTickFloor) {
   // Bound it loosely until the wake-up path is profiled on real hardware.
   EXPECT_LT(p50, 25.0);
 #else
-  EXPECT_LT(p50, 3.0) << "the old tick-polled floor was ~8.4 ms";
+  EXPECT_LT(p50, 3.0) << "a tick-polled floor would be ~8.4 ms";
 #endif
 
   client.Disconnect();

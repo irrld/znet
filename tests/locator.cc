@@ -164,8 +164,8 @@ TEST(TCPPeerLocator, ConnectCanBeTriedAgainAfterAFailure) {
   config.server_port = 1;
   p2p::tcp::PeerLocator locator{config};
   EXPECT_NE(locator.Connect(), Result::Success);
-  // a failed attempt used to leave is_running_ set and a worker parked, which
-  // turned every later Connect() into AlreadyConnected
+  // a failed attempt leaves nothing running, so a later Connect() is not
+  // refused as AlreadyConnected
   EXPECT_NE(locator.Connect(), Result::AlreadyConnected);
 }
 
@@ -710,7 +710,7 @@ TEST(RendezvousExchange, AClientIsNeverItsOwnMatch) {
   RawClient a{rendezvous.bind_address()->port()};
   a.Connect();
   a.Gather(4444, {});
-  // asking for itself used to pair it with itself, relay port and all
+  // asking for itself must not pair it with itself
   a.Ask(a.Name());
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   EXPECT_EQ(a.offer_count.load(), 0);
@@ -938,9 +938,7 @@ TEST(PunchCandidates, TCPRacesPastADeadCandidate) {
 }
 
 // A multi-homed peer offers every address it has, and most of them are dead to
-// anyone not on that network. Walking them one at a time spent the budget on
-// the dead ones and left the live one a fraction of the round trips, which made
-// the punch fail the more candidates it was given. The race should not care.
+// anyone not on that network. The race must not care how many are dead.
 TEST(PunchCandidates, TCPIsUnhurtByManyDeadCandidates) {
   ASSERT_EQ(Init(), Result::Success);
   RunTCPCandidateRace(FreePortLocal(SOCK_STREAM), FreePortLocal(SOCK_STREAM),
