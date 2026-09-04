@@ -221,10 +221,14 @@ uint16_t ZDTTransportLayer::DatagramMTU() const {
                            ? connection_.mtu
                            : ZDTPayloadForLinkMTU(config_.mtu_ladder.back(),
                                                   peer_->ipv());
-  if (connection_.relay_channel == 0 || mtu <= kZDTRelayHeaderSize) {
-    return mtu;
+  size_t overhead = 0;
+  if (connection_.relay_channel != 0) {
+    overhead += kZDTRelayHeaderSize;
   }
-  return static_cast<uint16_t>(mtu - kZDTRelayHeaderSize);
+  if (config_.enable_connection_migration) {
+    overhead += kZDTCidSize;  // the connection id rides in every datagram
+  }
+  return overhead < mtu ? static_cast<uint16_t>(mtu - overhead) : mtu;
 }
 
 void ZDTTransportLayer::BeginDatagram(Buffer& datagram) const {
@@ -511,8 +515,14 @@ WireSeq ZDTTransportLayer::SendBatch(uint8_t extra_flags,
     record_bytes += ZDTRecordSize(batch[i].record.flags & kRecFragment,
                                   batch[i].payload_len);
   }
+  if (config_.enable_connection_migration) {
+    header.flags |= kFlagHasCid;
+    header.cid = connection_.local_guid;
+  }
   const size_t mtu = DatagramMTU();
-  const size_t used = kZDTHeaderSize + record_bytes;
+  const size_t used = kZDTHeaderSize +
+                      (config_.enable_connection_migration ? kZDTCidSize : 0) +
+                      record_bytes;
   // how far back is worth describing: anything older the peer has already seen
   // acked, or it could not have kept sending. The +64 is slack for reordering.
   const size_t reportable = static_cast<size_t>(SendWindowCap()) + 64;
@@ -906,6 +916,10 @@ Result ZDTTransportLayer::Close(CloseOptions options) {
   if (socket_ && peer_) {
     ZDTHeader header;
     header.flags = static_cast<uint8_t>(kFlagOnline | kFlagFin);
+    if (config_.enable_connection_migration) {
+      header.flags |= kFlagHasCid;
+      header.cid = connection_.local_guid;
+    }
     header.packet_seq = 0;
     Buffer datagram(Endianness::BigEndian);
     BeginDatagram(datagram);

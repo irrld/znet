@@ -35,6 +35,9 @@ namespace backends {
 
 void WriteZDTHeader(Buffer& buffer, const ZDTHeader& header) {
   buffer.WriteInt<uint8_t>(header.flags);
+  if (header.flags & kFlagHasCid) {
+    buffer.WriteInt<uint64_t>(header.cid);
+  }
   buffer.WriteInt<uint16_t>(header.packet_seq);
   buffer.WriteInt<uint16_t>(header.ack);
   buffer.WriteInt<uint8_t>(header.block_count);
@@ -45,12 +48,21 @@ void WriteZDTHeader(Buffer& buffer, const ZDTHeader& header) {
 }
 
 bool ReadZDTHeader(Buffer& buffer, ZDTHeader& out_header) {
-  if (buffer.readable_bytes() < kZDTHeaderSize) {
+  if (buffer.readable_bytes() < 1) {
     return false;
   }
   out_header.flags = buffer.ReadInt<uint8_t>();
   if (!(out_header.flags & kFlagOnline)) {
     return false;  // offline (handshake) message, not an online datagram
+  }
+  // a connection id sits between the flags and the sequence when present, so
+  // the length the rest of the header needs depends on it
+  const size_t cid_size = (out_header.flags & kFlagHasCid) ? kZDTCidSize : 0;
+  if (buffer.readable_bytes() < (kZDTHeaderSize - 1) + cid_size) {
+    return false;
+  }
+  if (cid_size != 0) {
+    out_header.cid = buffer.ReadInt<uint64_t>();
   }
   out_header.packet_seq = buffer.ReadInt<uint16_t>();
   out_header.ack = buffer.ReadInt<uint16_t>();

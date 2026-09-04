@@ -212,6 +212,18 @@ struct ZDTOptions {
    * which counts whole connection attempts; this one bounds the datagrams a
    * handshake flood costs. */
   int per_source_handshake_rate = 20;
+  /**
+   * @brief Stamp every datagram with an 8-byte connection id (this endpoint's
+   *        guid), so a peer can be found again after its source address
+   *        changes. Off by default; both ends must enable it, and it costs 8
+   *        bytes of MTU.
+   *
+   * This lays the wire for connection migration. The routing that acts on the
+   * id, path-validating a new address before the send target follows it, is
+   * not built yet, so a receiver reads the id and ignores it for now.
+   */
+  bool enable_connection_migration = false;
+
   /** @brief Discard a partially reassembled message after this long. */
   std::chrono::milliseconds reassembly_timeout{5000};
   /**

@@ -42,6 +42,55 @@ ZDTHeader FillFrom(const ZDTAckHistory& history, size_t max_blocks = kZDTMaxAckB
 
 }  // namespace
 
+// --- header connection id -----------------------------------------------------
+
+// The connection id is the wire foundation for migration: present only when
+// kFlagHasCid is set, so a datagram without it is byte-for-byte the old layout.
+TEST(ZDTHeaderCid, RoundTripsWhenPresent) {
+  ZDTHeader header;
+  header.flags = kFlagOnline | kFlagHasCid;
+  header.cid = 0x0123456789abcdefULL;
+  header.packet_seq = 4242;
+  header.ack = 4200;
+
+  Buffer buffer(Endianness::BigEndian);
+  WriteZDTHeader(buffer, header);
+
+  ZDTHeader out;
+  ASSERT_TRUE(ReadZDTHeader(buffer, out));
+  EXPECT_TRUE(out.flags & kFlagHasCid);
+  EXPECT_EQ(out.cid, header.cid);
+  EXPECT_EQ(out.packet_seq, header.packet_seq);
+  EXPECT_EQ(out.ack, header.ack);
+}
+
+TEST(ZDTHeaderCid, AbsentLeavesTheLayoutUnchanged) {
+  ZDTHeader header;
+  header.flags = kFlagOnline;
+  header.packet_seq = 7;
+  header.ack = 3;
+
+  Buffer buffer(Endianness::BigEndian);
+  WriteZDTHeader(buffer, header);
+  // flags(1) + packet_seq(2) + ack(2) + block_count(1), no id
+  EXPECT_EQ(buffer.size(), kZDTHeaderSize);
+
+  ZDTHeader out;
+  ASSERT_TRUE(ReadZDTHeader(buffer, out));
+  EXPECT_FALSE(out.flags & kFlagHasCid);
+  EXPECT_EQ(out.cid, 0u);
+  EXPECT_EQ(out.packet_seq, 7);
+}
+
+TEST(ZDTHeaderCid, ShortDatagramWithTheFlagIsRejected) {
+  // the flag promises 8 more bytes; a datagram that lacks them must not parse
+  Buffer buffer(Endianness::BigEndian);
+  buffer.WriteInt<uint8_t>(kFlagOnline | kFlagHasCid);
+  buffer.WriteInt<uint16_t>(1);  // stops well short of the id plus the rest
+  ZDTHeader out;
+  EXPECT_FALSE(ReadZDTHeader(buffer, out));
+}
+
 // --- sequence comparison ------------------------------------------------------
 
 // These decide what counts as "newer" everywhere in the protocol, and they have

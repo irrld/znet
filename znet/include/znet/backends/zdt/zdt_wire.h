@@ -57,6 +57,7 @@ ZNET_INLINE_CONSTEXPR std::array<uint8_t, 8> kZDTMagic = {'Z', 'N', 'E', 'T',
 ZNET_INLINE_CONSTEXPR uint8_t kFlagFin = 1u << 0;     // graceful close
 ZNET_INLINE_CONSTEXPR uint8_t kFlagPing = 1u << 1;    // keepalive probe
 ZNET_INLINE_CONSTEXPR uint8_t kFlagPong = 1u << 2;    // keepalive reply
+ZNET_INLINE_CONSTEXPR uint8_t kFlagHasCid = 1u << 3;  // 8-byte connection id present
 ZNET_INLINE_CONSTEXPR uint8_t kFlagOnline = 1u << 7;  // online-datagram marker
 
 // --- Relay channel header ----------------------------------------------------
@@ -91,6 +92,10 @@ enum class ZDTOfflineMsg : uint8_t {
   RelayBound = 0x0B,  // relay -> peer: token(8), channel(4)
   Reflect = 0x0C,     // peer -> relay: nonce(8), padded to kZDTReflectSize
   Reflected = 0x0D,   // relay -> peer: nonce(8), observed address
+  // connection migration: confirm a peer really moved to a new address
+  // before the send target follows it. See enable_connection_migration.
+  PathChallenge = 0x0E,  // to a new address: cid(8), nonce(8)
+  PathResponse = 0x0F,   // echoed from it: cid(8), nonce(8)
 };
 
 // id(1) + magic
@@ -104,8 +109,10 @@ ZNET_INLINE_CONSTEXPR size_t kZDTReflectSize = 64;
 // messages share one instead of each paying for its own. zero records is a valid
 // control datagram (bare ack, ping, pong or fin).
 // flags(1) + packet_seq(2) + ack(2) + block_count(1), then 2 bytes per block.
-// this is the fixed part; ReadZDTHeader checks the blocks separately.
+// this is the fixed part; a kFlagHasCid datagram carries kZDTCidSize more
+// right after the flags byte, and ReadZDTHeader checks the blocks separately.
 ZNET_INLINE_CONSTEXPR size_t kZDTHeaderSize = 6;
+ZNET_INLINE_CONSTEXPR size_t kZDTCidSize = 8;
 // rec_flags, channel, message_seq, length
 ZNET_INLINE_CONSTEXPR size_t kZDTRecordHeaderSize = 6;
 // the above plus frag_index and frag_count
@@ -149,7 +156,7 @@ ZNET_INLINE_CONSTEXPR size_t kZDTAckBlockSize = 2;
 // datagram would carry no ack at all.
 ZNET_INLINE_CONSTEXPR size_t kZDTAckBlocksReserved = 4;
 ZNET_INLINE_CONSTEXPR size_t kZDTHeaderReserve =
-    kZDTHeaderSize + kZDTAckBlocksReserved * kZDTAckBlockSize;
+    kZDTHeaderSize + kZDTCidSize + kZDTAckBlocksReserved * kZDTAckBlockSize;
 
 // how long a base round trip measurement stays authoritative. the minimum is
 // the queue-free path, so it has to be re-probed: a route change or a handover
@@ -191,6 +198,10 @@ struct ZDTAckBlock {
 
 struct ZDTHeader {
   uint8_t flags = kFlagOnline;
+  // present only when flags carries kFlagHasCid: the sender's own guid, so
+  // the receiver can route this datagram to the session after the source
+  // address changed
+  uint64_t cid = 0;
   uint16_t packet_seq = 0;  // connection-level, ++ per datagram (drives ack/RTT)
   uint16_t ack = 0;         // highest packet_seq seen from peer
   // run-length encoded picture of what arrived, walking back from `ack`. the
