@@ -32,8 +32,10 @@ namespace znet {
 namespace backends {
 
 /**
- * @brief Jacobson/Karels smoothed round trip, plus the windowed minimum the
- *        congestion signal is measured against.
+ * @brief Jacobson/Karels smoothed round trip for the retransmit timeout, and
+ *        the two windowed minimums the congestion signal is read from: the
+ *        floor, re-probed every ten seconds, and the smallest sample of the
+ *        last two round trips, which is what gets compared against it.
  */
 class ZDTRttEstimator {
  public:
@@ -55,14 +57,22 @@ class ZDTRttEstimator {
                 std::chrono::milliseconds rto_max);
 
   /**
-   * @brief Whether the round trip has grown enough above its floor to read as a
-   *        queue building rather than jitter.
+   * @brief Whether every round trip of the last full window sat far enough
+   *        above the floor to read as a queue building. One late ack, held by
+   *        a busy endpoint, does not; a standing queue does.
+   *
+   * Known limit: a purely relative test is wrong at the bottom of the range.
+   * At the few microseconds of a loopback round trip the ratio is a margin
+   * under a microsecond, so the ordinary cost of keeping data in flight reads
+   * as a queue and the window sits low on a path that has none. An absolute
+   * margin opens the window there but costs about 30% at 64 B and makes that
+   * case bimodal, so it is not simply a better rule.
    *
    * Inline: evaluated per ack and per retransmit scan.
    */
   ZNET_NODISCARD bool IsQueueing() const {
-    return has_rtt_ && rtt_min_ms_ > 0.0 &&
-           srtt_ms_ > rtt_min_ms_ * kZDTQueueingRttRatio;
+    return has_rtt_ && rtt_min_ms_ > 0.0 && window_min_ms_ > 0.0 &&
+           window_min_ms_ > rtt_min_ms_ * kZDTQueueingRttRatio;
   }
 
   ZNET_NODISCARD bool has_rtt() const { return has_rtt_; }
@@ -78,6 +88,11 @@ class ZDTRttEstimator {
   // baseline as permanent queueing and pin the window at its lower bound.
   double rtt_min_ms_ = 0.0;
   TimePoint rtt_min_stamp_;
+  // the smallest sample of the last full window, which is what IsQueueing()
+  // reads, and the one being collected
+  double window_min_ms_ = 0.0;
+  double collecting_min_ms_ = 0.0;
+  TimePoint window_start_;
   bool has_rtt_ = false;
   std::chrono::milliseconds rto_{200};
 };
@@ -116,9 +131,9 @@ class ZDTCongestionController {
   /**
    * @brief A retransmit scan found something timed out.
    *
-   * Collapses hard only when the round trip says a queue is involved; a plain
-   * lossy path gets a gentler reduction, since a timeout there is usually still
-   * just loss.
+   * Halves when the round trip says a queue stands; a plain lossy path gets
+   * a small reduction, since a timeout there is usually still just loss.
+   * Either way it is one reduction per loss epoch, like every other.
    */
   void OnRetransmitTimeout(const ZDTRttEstimator& rtt, WireSeq next_seq);
 
@@ -129,10 +144,7 @@ class ZDTCongestionController {
    * Inline: evaluated per iteration of the flush loop.
    */
   ZNET_NODISCARD int Window(int cap) const {
-    int w = static_cast<int>(cwnd_);
-    if (w < 2) {
-      w = 2;  // always allow enough in flight to make forward progress
-    }
+    const int w = static_cast<int>(cwnd_);
     return w > cap ? cap : w;
   }
 
@@ -140,10 +152,13 @@ class ZDTCongestionController {
   ZNET_NODISCARD bool in_loss_recovery() const { return in_loss_recovery_; }
 
  private:
+  // one reduction per loss epoch, whoever reports the event; the epoch ends
+  // when the peer acknowledges something sent after it opened. The window
+  // never drops below kZDTMinWindow, and slow-starts back to what it had.
+  void Reduce(double factor, WireSeq next_seq);
+
   double cwnd_ = 10.0;     // initial window, TCP's IW10
   double ssthresh_ = 1e9;  // no threshold until the first loss teaches one
-  // suppresses repeated reduction inside one round trip: one loss event should
-  // cost one reduction, not one per lost datagram in the same window.
   WireSeq loss_recovery_until_ = 0;
   bool in_loss_recovery_ = false;
 };

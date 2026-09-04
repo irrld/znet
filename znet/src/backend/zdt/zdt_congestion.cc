@@ -10,6 +10,7 @@
 
 #include "znet/backends/zdt/zdt_congestion.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace znet {
@@ -29,6 +30,8 @@ void ZDTRttEstimator::OnSample(std::chrono::steady_clock::duration sample,
     rttvar_ms_ = ms / 2.0;
     rtt_min_ms_ = ms;
     rtt_min_stamp_ = now;
+    collecting_min_ms_ = ms;
+    window_start_ = now;
   } else {
     const bool stale =
         now - rtt_min_stamp_ > std::chrono::milliseconds(kZDTRttMinWindowMs);
@@ -38,6 +41,19 @@ void ZDTRttEstimator::OnSample(std::chrono::steady_clock::duration sample,
     }
     rttvar_ms_ = 0.75 * rttvar_ms_ + 0.25 * std::fabs(srtt_ms_ - ms);
     srtt_ms_ = 0.875 * srtt_ms_ + 0.125 * ms;
+    // one sample cannot open or close the queueing verdict; a full window of
+    // them does. Two round trips, floored so a loopback window holds more
+    // than a handful of samples.
+    const double window_ms =
+        std::max(2.0 * srtt_ms_, static_cast<double>(kZDTQueueingWindowFloorMs));
+    const auto window = std::chrono::duration<double, std::milli>(window_ms);
+    if (now - window_start_ >= window) {
+      window_min_ms_ = collecting_min_ms_;
+      collecting_min_ms_ = ms;
+      window_start_ = now;
+    } else if (ms < collecting_min_ms_) {
+      collecting_min_ms_ = ms;
+    }
   }
   const auto rto = std::chrono::milliseconds(
       static_cast<long long>(srtt_ms_ + 4.0 * rttvar_ms_));
@@ -52,19 +68,31 @@ void ZDTCongestionController::OnAckArrived(WireSeq peer_ack) {
   }
 }
 
+void ZDTCongestionController::Reduce(double factor, WireSeq next_seq) {
+  if (in_loss_recovery_) {
+    return;  // this epoch already paid
+  }
+  in_loss_recovery_ = true;
+  loss_recovery_until_ = next_seq;
+  // the window it had is where slow start hands over to additive growth: a
+  // reduction probes the queue, and once the verdict clears the window comes
+  // back in a few round trips rather than one datagram per round trip
+  ssthresh_ = cwnd_;
+  cwnd_ *= factor;
+  if (cwnd_ < kZDTMinWindow) {
+    cwnd_ = kZDTMinWindow;
+  }
+}
+
 void ZDTCongestionController::OnAcked(int acked_datagrams,
                                       const ZDTRttEstimator& rtt,
                                       WireSeq next_seq, int cap) {
   if (acked_datagrams <= 0) {
     return;
   }
-  if (rtt.IsQueueing() && cwnd_ > 4.0) {
-    if (!in_loss_recovery_) {
-      in_loss_recovery_ = true;
-      loss_recovery_until_ = next_seq;
-      cwnd_ *= kZDTQueueingBackoff;
-      ssthresh_ = cwnd_;
-    }
+  // a standing queue: back off once, and do not grow while it stands
+  if (rtt.IsQueueing() && cwnd_ > 2.0 * kZDTMinWindow) {
+    Reduce(kZDTQueueingBackoff, next_seq);
     return;
   }
   if (cwnd_ < ssthresh_) {
@@ -80,25 +108,8 @@ void ZDTCongestionController::OnAcked(int acked_datagrams,
 
 void ZDTCongestionController::OnRetransmitTimeout(const ZDTRttEstimator& rtt,
                                                   WireSeq next_seq) {
-  if (rtt.IsQueueing()) {
-    // guarded like the delay path: a burst of timeouts is one event, and
-    // collapsing once per message in it would take several round trips of
-    // slow start to undo.
-    if (!in_loss_recovery_) {
-      ssthresh_ = cwnd_ / 2.0;
-      if (ssthresh_ < 2.0) {
-        ssthresh_ = 2.0;
-      }
-      cwnd_ = 2.0;
-      in_loss_recovery_ = true;
-      loss_recovery_until_ = next_seq;
-    }
-  } else {
-    cwnd_ *= 0.9;
-    if (cwnd_ < 8.0) {
-      cwnd_ = 8.0;
-    }
-  }
+  Reduce(rtt.IsQueueing() ? kZDTQueueingTimeoutBackoff : kZDTLossTimeoutBackoff,
+         next_seq);
 }
 
 }  // namespace backends

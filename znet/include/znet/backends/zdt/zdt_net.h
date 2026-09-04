@@ -129,6 +129,14 @@ void ApplySocketBufferSizes(UDPSocket& socket, int recv_bytes, int send_bytes);
 
 // thread-safe datagram queue, shared by a producer and a consumer running on
 // different threads (see ZDTTransportLayer for the threading rule).
+// one datagram as it came off the socket, and when. The round trip is measured
+// to the arrival rather than to the parse, so a worker that was busy when the
+// ack came in does not make the path read as a queue building.
+struct ZDTInbound {
+  Buffer datagram;
+  std::chrono::steady_clock::time_point arrival;
+};
+
 class ZDTInbox {
  public:
   // moves one ready-to-parse datagram in; the caller builds it outside the
@@ -136,12 +144,12 @@ class ZDTInbox {
   // once `limit` datagrams are pending, so a flooding peer cannot grow this
   // queue without bound (the refused buffer is simply destroyed).
   bool Push(Buffer&& datagram, size_t limit);
-  void Drain(std::deque<Buffer>& out);
+  void Drain(std::deque<ZDTInbound>& out);
   size_t dropped() const;
 
  private:
   mutable std::mutex mutex_;
-  std::deque<Buffer> queue_;
+  std::deque<ZDTInbound> queue_;
   size_t dropped_ = 0;
 };
 

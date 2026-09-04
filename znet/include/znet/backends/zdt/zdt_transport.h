@@ -127,17 +127,15 @@ class ZDTTransportLayer : public TransportLayer {
   WireSeq SendBatch(uint8_t extra_flags, const PendingRecord* batch,
                     size_t count);
 
-  // encodes the arrival history into at most max_blocks blocks, so the caller
-  // can hold the datagram inside the MTU.
-  // congestion control: grows while acks arrive, backs off on queueing delay.
-  /** @brief Whether the round trip says a real queue is building. */
+  // datagrams the controller allows in flight, and the ceiling on it
   ZNET_NODISCARD int SendWindow() const;
   ZNET_NODISCARD int SendWindowCap() const;
   // marks a reported gap for immediate retransmit and stops tracking it, so one
   // loss costs one resend however often the peer keeps reporting it.
   void OnNak(WireSeq packet_seq);
-  void ProcessAcks(const ZDTHeader& header);  // consume the peer's ack blocks
-  bool AckPacket(WireSeq packet_seq);  // true if this ack was new
+  // consume the peer's ack blocks; `arrival` is when the datagram came in
+  void ProcessAcks(const ZDTHeader& header, TimePoint arrival);
+  bool AckPacket(WireSeq packet_seq, TimePoint arrival);  // true if new
   void RetransmitUnacked();
   // resends the newest unacked message when acks go silent, so a lost burst
   // tail does not wait out the RTO floor. Even when the probed message was not
@@ -287,7 +285,7 @@ class ZDTTransportLayer : public TransportLayer {
   // allocates its map and first node immediately, so declaring this local meant
   // two mallocs on every tick whether or not a datagram had arrived. swapping
   // into a member keeps those nodes alive between calls. session worker only.
-  std::deque<Buffer> inbound_scratch_;
+  std::deque<ZDTInbound> inbound_scratch_;
   // where DrainSocket() lands each recvfrom before the right-sized copy goes
   // into the inbox. reserved once; worker only.
   Buffer recv_scratch_{Endianness::BigEndian};

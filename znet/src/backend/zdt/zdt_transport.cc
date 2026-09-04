@@ -156,16 +156,13 @@ void ZDTTransportLayer::ProcessInbound() {
   // swaps, so leftovers would land back in the inbox and be processed twice.
   inbound_scratch_.clear();
   inbox_->Drain(inbound_scratch_);
-  for (Buffer& buffer : inbound_scratch_) {
-    if (buffer.size() == 0 ||
-        !(static_cast<uint8_t>(buffer.data()[0]) & kFlagOnline)) {
-      continue;  // stray/offline datagram on a connected transport
-    }
+  for (ZDTInbound& inbound : inbound_scratch_) {
+    Buffer& buffer = inbound.datagram;
     ZDTHeader header;
     if (!ReadZDTHeader(buffer, header)) {
       continue;
     }
-    last_recv_ = steady_clock::now();
+    last_recv_ = inbound.arrival;
     ZNET_METRIC(metrics_.zdt.datagrams_received++);
     ZNET_METRIC(metrics_.common.wire_bytes_received += buffer.size());
     // packet_seq 0 is the sentinel used by stateless control datagrams (the
@@ -173,7 +170,7 @@ void ZDTTransportLayer::ProcessInbound() {
     // ack state to fold in. The peer's acks are always consumed, but ours is
     // only extended to cover this datagram once every record in it was taken.
     if (header.packet_seq != 0) {
-      ProcessAcks(header);
+      ProcessAcks(header, inbound.arrival);
     }
     if (header.flags & kFlagFin) {
       is_closed_ = true;
@@ -620,14 +617,15 @@ void ZDTTransportLayer::OnNak(WireSeq packet_seq) {
   ZNET_METRIC(metrics_.zdt.naks_received++);
 }
 
-void ZDTTransportLayer::ProcessAcks(const ZDTHeader& header) {
+void ZDTTransportLayer::ProcessAcks(const ZDTHeader& header,
+                                    TimePoint arrival) {
   congestion_.OnAckArrived(header.ack);
   int newly_acked = 0;
   uint32_t offset = 0;
   for (uint8_t b = 0; b < header.block_count && offset < kZDTAckHistoryBits;
        b++) {
     for (uint8_t k = 0; k < header.blocks[b].num_ack; k++) {
-      if (AckPacket(static_cast<WireSeq>(header.ack - offset))) {
+      if (AckPacket(static_cast<WireSeq>(header.ack - offset), arrival)) {
         newly_acked++;
       }
       offset++;
@@ -648,7 +646,7 @@ void ZDTTransportLayer::ProcessAcks(const ZDTHeader& header) {
   }
 }
 
-bool ZDTTransportLayer::AckPacket(WireSeq packet_seq) {
+bool ZDTTransportLayer::AckPacket(WireSeq packet_seq, TimePoint arrival) {
   if (packet_seq == 0) {
     return false;  // reserved sentinel: the peer had nothing to acknowledge yet
   }
@@ -657,8 +655,9 @@ bool ZDTTransportLayer::AckPacket(WireSeq packet_seq) {
     return false;
   }
   // packet_seq is unique per transmission, so there is no Karn ambiguity.
-  const TimePoint now = steady_clock::now();
-  rtt_.OnSample(now - it->second.send_time, now, config_.rto_min,
+  // measured to the arrival: the time this ack then waited for a busy worker
+  // is not the network's
+  rtt_.OnSample(arrival - it->second.send_time, arrival, config_.rto_min,
                 config_.rto_max);
   // one datagram can carry several reliable messages; acking it retires all of
   // them. dropping each message's other transmissions keeps a sent_packets_

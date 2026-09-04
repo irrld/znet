@@ -294,17 +294,28 @@ TEST(ZDTRttTest, MinimumIsReprobedOnceStale) {
   EXPECT_DOUBLE_EQ(rtt.rtt_min_ms(), 80.0);
 }
 
-TEST(ZDTRttTest, QueueingIsTheRatioAgainstTheFloor) {
+TEST(ZDTRttTest, QueueingIsAWholeWindowAboveTheFloor) {
   ZDTRttEstimator rtt;
   rtt.OnSample(Ms{100}, At(0), Ms{10}, Ms{5000});
   EXPECT_FALSE(rtt.IsQueueing()) << "a single sample is its own floor";
 
-  // drive srtt up while the floor stays at 100
-  for (int i = 0; i < 40; i++) {
-    rtt.OnSample(Ms{200}, At(10 + i), Ms{10}, Ms{5000});
+  // every sample high, long enough for whole windows to fill with them
+  for (int i = 1; i <= 80; i++) {
+    rtt.OnSample(Ms{200}, At(10 * i), Ms{10}, Ms{5000});
   }
-  EXPECT_GT(rtt.srtt_ms(), rtt.rtt_min_ms() * kZDTQueueingRttRatio);
   EXPECT_TRUE(rtt.IsQueueing());
+}
+
+// a busy endpoint holds the odd ack; a queue holds every round trip up. One
+// high sample among low ones must not read as congestion.
+TEST(ZDTRttTest, OneLateSampleIsNotAQueue) {
+  ZDTRttEstimator rtt;
+  rtt.OnSample(Ms{100}, At(0), Ms{10}, Ms{5000});
+  for (int i = 1; i <= 80; i++) {
+    const Ms sample = i == 40 ? Ms{400} : Ms{100};
+    rtt.OnSample(sample, At(10 * i), Ms{10}, Ms{5000});
+    EXPECT_FALSE(rtt.IsQueueing()) << "at sample " << i;
+  }
 }
 
 TEST(ZDTRttTest, NoSamplesMeansNoQueueingSignal) {
@@ -327,8 +338,9 @@ ZDTRttEstimator QuietRtt() {
 ZDTRttEstimator QueueingRtt() {
   ZDTRttEstimator rtt;
   rtt.OnSample(Ms{10}, At(0), Ms{1}, Ms{5000});
-  for (int i = 0; i < 60; i++) {
-    rtt.OnSample(Ms{100}, At(1 + i), Ms{1}, Ms{5000});
+  // spread over enough time for whole windows to fill with high samples
+  for (int i = 1; i <= 60; i++) {
+    rtt.OnSample(Ms{100}, At(10 * i), Ms{1}, Ms{5000});
   }
   return rtt;
 }
@@ -405,52 +417,89 @@ TEST(ZDTCongestionTest, RecoveryEndsOnceTheEpochSequenceIsAcked) {
   EXPECT_FALSE(cc.in_loss_recovery());
 }
 
-TEST(ZDTCongestionTest, QueueingTimeoutCollapsesToTwoOncePerEpoch) {
+TEST(ZDTCongestionTest, QueueingTimeoutHalvesOncePerEpoch) {
   ZDTCongestionController cc;
   const ZDTRttEstimator rtt = QueueingRtt();
+  const double start = cc.cwnd();
   cc.OnRetransmitTimeout(rtt, /*next_seq=*/50);
-  EXPECT_DOUBLE_EQ(cc.cwnd(), 2.0);
+  EXPECT_DOUBLE_EQ(cc.cwnd(), start / 2.0);
 
   cc.OnRetransmitTimeout(rtt, /*next_seq=*/51);
-  EXPECT_DOUBLE_EQ(cc.cwnd(), 2.0) << "same epoch, no second collapse";
+  EXPECT_DOUBLE_EQ(cc.cwnd(), start / 2.0) << "same epoch, no second cut";
 }
 
-// CHARACTERIZATION, not endorsement. On a lossy-but-uncongested path the
-// queueing signal is false, and this branch carries no epoch guard, so every
-// scan that finds a timeout multiplies the window again. Several scans can fall
-// inside one round trip, which walks the window down to its floor and keeps it
-// there. This asserts what the code does today; see the refactor plan.
-TEST(ZDTCongestionTest, RepeatedTimeoutsWithoutQueueingWalkDownToTheFloor) {
+// a timeout on a path that is lossy rather than congested is not evidence of a
+// queue, so it costs a small reduction, and only one per epoch however many
+// scans find something timed out inside it
+TEST(ZDTCongestionTest, LossyTimeoutCutsOncePerEpoch) {
   ZDTCongestionController cc;
   const ZDTRttEstimator rtt = QuietRtt();
   ASSERT_FALSE(rtt.IsQueueing());
 
   const double start = cc.cwnd();
   cc.OnRetransmitTimeout(rtt, /*next_seq=*/10);
-  EXPECT_DOUBLE_EQ(cc.cwnd(), start * 0.9) << "one reduction per scan";
+  EXPECT_DOUBLE_EQ(cc.cwnd(), start * kZDTLossTimeoutBackoff);
+  EXPECT_TRUE(cc.in_loss_recovery());
 
   for (int i = 0; i < 40; i++) {
     cc.OnRetransmitTimeout(rtt, static_cast<WireSeq>(11 + i));
   }
-  EXPECT_DOUBLE_EQ(cc.cwnd(), 8.0)
-      << "unguarded by any epoch, repeated scans reach the floor";
-  EXPECT_FALSE(cc.in_loss_recovery())
-      << "and this path never opens an epoch, so nothing suppresses the next one";
+  EXPECT_DOUBLE_EQ(cc.cwnd(), start * kZDTLossTimeoutBackoff)
+      << "the same epoch never pays twice";
+
+  cc.OnAckArrived(11 + 40);
+  ASSERT_FALSE(cc.in_loss_recovery());
+  cc.OnRetransmitTimeout(rtt, /*next_seq=*/100);
+  EXPECT_DOUBLE_EQ(cc.cwnd(),
+                   start * kZDTLossTimeoutBackoff * kZDTLossTimeoutBackoff)
+      << "a fresh epoch pays again";
 }
 
-// The two timeout paths floor at different values, which is worth pinning
-// because it is surprising rather than obviously intended.
-TEST(ZDTCongestionTest, TheTwoTimeoutFloorsDisagree) {
-  ZDTCongestionController queueing;
-  queueing.OnRetransmitTimeout(QueueingRtt(), 1);
-  EXPECT_DOUBLE_EQ(queueing.cwnd(), 2.0);
-
-  ZDTCongestionController lossy;
+// a reduction probes the queue; once the verdict clears, the window comes
+// back to what it had in slow start and only then grows additively
+TEST(ZDTCongestionTest, AReducedWindowSlowStartsBackToWhereItWas) {
+  ZDTCongestionController cc;
   const ZDTRttEstimator quiet = QuietRtt();
-  for (int i = 0; i < 50; i++) {
-    lossy.OnRetransmitTimeout(quiet, static_cast<WireSeq>(i));
+  for (int i = 0; i < 20; i++) {
+    cc.OnAcked(10, quiet, /*next_seq=*/1, kCap);
   }
-  EXPECT_DOUBLE_EQ(lossy.cwnd(), 8.0);
+  const double before = cc.cwnd();
+  ASSERT_GT(before, 100.0);
+
+  cc.OnRetransmitTimeout(quiet, /*next_seq=*/50);
+  ASSERT_DOUBLE_EQ(cc.cwnd(), before * kZDTLossTimeoutBackoff);
+  cc.OnAckArrived(50);
+
+  // slow start: every acked datagram adds one, up to the old window
+  cc.OnAcked(10, quiet, /*next_seq=*/60, kCap);
+  EXPECT_DOUBLE_EQ(cc.cwnd(), before * kZDTLossTimeoutBackoff + 10.0);
+  while (cc.cwnd() < before) {
+    cc.OnAcked(10, quiet, /*next_seq=*/60, kCap);
+  }
+  // past it, additive: ten acks add well under one datagram
+  const double reached = cc.cwnd();
+  cc.OnAcked(10, quiet, /*next_seq=*/60, kCap);
+  EXPECT_LT(cc.cwnd() - reached, 1.0);
+}
+
+// every reduction stops at the same floor, and Window() reports exactly that
+TEST(ZDTCongestionTest, EveryPathFloorsAtTheMinimumWindow) {
+  const ZDTRttEstimator congested = QueueingRtt();
+  ZDTCongestionController queueing;
+  for (int i = 1; i <= 8; i++) {
+    queueing.OnRetransmitTimeout(congested, static_cast<WireSeq>(i));
+    queueing.OnAckArrived(static_cast<WireSeq>(i));
+  }
+  EXPECT_DOUBLE_EQ(queueing.cwnd(), kZDTMinWindow);
+  EXPECT_EQ(queueing.Window(kCap), static_cast<int>(kZDTMinWindow));
+
+  const ZDTRttEstimator quiet = QuietRtt();
+  ZDTCongestionController lossy;
+  for (int i = 1; i <= 60; i++) {
+    lossy.OnRetransmitTimeout(quiet, static_cast<WireSeq>(i));
+    lossy.OnAckArrived(static_cast<WireSeq>(i));
+  }
+  EXPECT_DOUBLE_EQ(lossy.cwnd(), kZDTMinWindow);
 }
 
 // ---------------------------------------------------------------------------

@@ -219,11 +219,12 @@ bool ZDTInbox::Push(Buffer&& datagram, size_t limit) {
     dropped_++;
     return false;
   }
-  queue_.push_back(std::move(datagram));
+  queue_.push_back(
+      ZDTInbound{std::move(datagram), std::chrono::steady_clock::now()});
   return true;
 }
 
-void ZDTInbox::Drain(std::deque<Buffer>& out) {
+void ZDTInbox::Drain(std::deque<ZDTInbound>& out) {
   std::lock_guard<std::mutex> lock(mutex_);
   out.swap(queue_);
 }

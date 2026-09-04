@@ -158,9 +158,19 @@ ZNET_INLINE_CONSTEXPR size_t kZDTHeaderReserve =
 ZNET_INLINE_CONSTEXPR int kZDTRttMinWindowMs = 10000;
 
 // round trip inflation that counts as a queue building rather than jitter, and
-// how hard to back off when it does.
+// how hard to back off when it does: an ack that finds the queue, a timeout
+// while the queue stands, and a timeout on a path that is merely lossy, which
+// a delay-based controller treats as loss rather than congestion. Every
+// reduction is one per loss epoch and never below kZDTMinWindow.
 ZNET_INLINE_CONSTEXPR double kZDTQueueingRttRatio = 1.25;
 ZNET_INLINE_CONSTEXPR double kZDTQueueingBackoff = 0.85;
+ZNET_INLINE_CONSTEXPR double kZDTQueueingTimeoutBackoff = 0.5;
+ZNET_INLINE_CONSTEXPR double kZDTLossTimeoutBackoff = 0.9;
+ZNET_INLINE_CONSTEXPR double kZDTMinWindow = 2.0;
+// the test reads the smallest sample of the last full window, not the
+// smoothed value: a queue holds every round trip up, a busy endpoint only the
+// odd one. The window is two round trips, and never shorter than this.
+ZNET_INLINE_CONSTEXPR int kZDTQueueingWindowFloorMs = 10;
 
 // tail-loss probe: how long the ack stream may stay silent with reliable data
 // outstanding before the newest unacked message is resent once. A lost burst
