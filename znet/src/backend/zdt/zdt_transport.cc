@@ -133,20 +133,10 @@ void ZDTTransportLayer::DrainSocket() {
       break;
     }
     recv_scratch_.CommitWrite(len);
-    const char* data = recv_scratch_.data();
-    size_t size = recv_scratch_.size();
-    // through a relay every datagram arrives wrapped in this channel
-    if (connection_.relay_channel != 0) {
-      uint32_t channel = 0;
-      if (!ReadRelayHeader(reinterpret_cast<const uint8_t*>(data), size,
-                           channel) ||
-          channel != connection_.relay_channel) {
-        continue;
-      }
-      data += kZDTRelayHeaderSize;
-      size -= kZDTRelayHeaderSize;
-    }
-    inbox_->Push(Buffer(data, size, Endianness::BigEndian),
+    // a relayed session is always driven by a p2p::Host, which strips the
+    // relay header before OnDatagram(); a self-draining transport is direct
+    inbox_->Push(Buffer(recv_scratch_.data(), recv_scratch_.size(),
+                        Endianness::BigEndian),
                  config_.max_inbox_datagrams);
   }
 }
@@ -160,7 +150,7 @@ void ZDTTransportLayer::ProcessInbound() {
     Buffer& buffer = inbound.datagram;
     ZDTHeader header;
     if (!ReadZDTHeader(buffer, header)) {
-      continue;
+      continue;  // short, or an offline datagram on a connected transport
     }
     last_recv_ = inbound.arrival;
     ZNET_METRIC(metrics_.zdt.datagrams_received++);
@@ -467,9 +457,6 @@ void ZDTTransportLayer::TrackReliable(const PendingRecord& pending,
                                       TransmissionLog log) {
   // rtt_.rto() can shrink, so this message may fall due before the cached deadline
   next_retransmit_scan_ = std::min(next_retransmit_scan_, now + rtt_.rto());
-  // the probe measures silence after the newest send, so every send pushes it
-  tail_probes_fired_ = 0;
-  tail_probe_at_ = now + TailProbeDelay();
   unacked_[pending.key] = OutReliable{pending.owner,             // message
                                       offset,                    // offset
                                       pending.payload_len,       // length
@@ -481,6 +468,24 @@ void ZDTTransportLayer::TrackReliable(const PendingRecord& pending,
                                       now,                       // last_send
                                       1,                         // send_count
                                       log};              // packets
+  RearmTailProbe(now);
+}
+
+void ZDTTransportLayer::RearmTailProbe(TimePoint now) {
+  tail_probes_fired_ = 0;
+  tail_probe_at_ = unacked_.empty() ? TimePoint::max()
+                                    : now + TailProbeDelay();
+}
+
+WireSeq ZDTTransportLayer::ResendReliable(const MsgKey& key,
+                                          OutReliable& msg) {
+  PendingRecord pending =
+      MakeRecord(msg.message, msg.offset, msg.length, msg.data_flags,
+                 msg.channel, key.message_seq, msg.frag_index, msg.frag_count,
+                 /*reliable=*/true);
+  const WireSeq packet = SendBatch(0, &pending, 1);
+  msg.packets.Add(packet);
+  return packet;
 }
 
 void ZDTTransportLayer::SendControl(uint8_t flags) {
@@ -640,9 +645,7 @@ void ZDTTransportLayer::ProcessAcks(const ZDTHeader& header,
     // progress breaks the silence; a duplicate ack does not, because a peer
     // that answers without retiring anything is describing exactly the stall
     // the probe exists to break
-    tail_probes_fired_ = 0;
-    tail_probe_at_ = unacked_.empty() ? TimePoint::max()
-                                      : steady_clock::now() + TailProbeDelay();
+    RearmTailProbe(steady_clock::now());
   }
 }
 
@@ -709,12 +712,7 @@ void ZDTTransportLayer::RetransmitUnacked() {
     }
     // one per datagram: batching would tie unrelated messages' recovery
     // together, and retransmits should be rare.
-    PendingRecord pending =
-        MakeRecord(msg.message, msg.offset, msg.length, msg.data_flags,
-                   msg.channel, entry.first.message_seq, msg.frag_index,
-                   msg.frag_count, /*reliable=*/true);
-    WireSeq packet = SendBatch(0, &pending, 1);
-    msg.packets.Add(packet);
+    ResendReliable(entry.first, msg);
     ZNET_METRIC(metrics_.zdt.retransmits++);
     msg.last_send = now;
     msg.send_count++;
@@ -760,13 +758,7 @@ void ZDTTransportLayer::MaybeTailProbe(TimePoint now) {
       newest = it;
     }
   }
-  OutReliable& msg = newest->second;
-  PendingRecord pending =
-      MakeRecord(msg.message, msg.offset, msg.length, msg.data_flags,
-                 msg.channel, newest->first.message_seq, msg.frag_index,
-                 msg.frag_count, /*reliable=*/true);
-  WireSeq packet = SendBatch(0, &pending, 1);
-  msg.packets.Add(packet);
+  ResendReliable(newest->first, newest->second);
   ZNET_METRIC(metrics_.zdt.tail_probes++);
   // last_send and send_count stay untouched: the RTO backstop keeps both its
   // schedule and its give-up accounting, the probe is extra traffic on top.

@@ -32,6 +32,40 @@ using steady_clock = std::chrono::steady_clock;
 // ZDTClientBackend
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// the receive thread of either backend: one datagram at a time to `deliver`,
+// which says whether it was for anyone, then a wake for whoever processes it
+// so the session does not wait out its tick
+template <typename Deliver>
+void ReceiveDatagrams(UDPSocket& socket, const std::atomic_bool& receiving,
+                      const std::function<void()>& on_data, Deliver deliver) {
+  Buffer scratch(Endianness::BigEndian);
+  scratch.ReserveExact(ZNET_MAX_BUFFER_SIZE);
+  while (receiving.load(std::memory_order_relaxed)) {
+    scratch.Reset();
+    size_t len = 0;
+    std::shared_ptr<InetAddress> from;
+    RecvResult result = socket.RecvFrom(scratch.write_cursor_data(),
+                                        scratch.writable_bytes(), len, from);
+    if (result == RecvResult::WouldBlock) {
+      continue;  // receive timeout expired, just re-check the stop flag
+    }
+    if (result == RecvResult::Error) {
+      break;  // socket closed underneath us, shutdown is in progress
+    }
+    if (len == 0 || !from) {
+      continue;
+    }
+    scratch.CommitWrite(len);
+    if (deliver(scratch, from) && on_data) {
+      on_data();
+    }
+  }
+}
+
+}  // namespace
+
 ZDTClientBackend::ZDTClientBackend(std::shared_ptr<InetAddress> server_address,
                                    const SessionOptions& options)
     : server_address_(std::move(server_address)), config_(options.zdt),
@@ -256,34 +290,18 @@ Result ZDTClientBackend::Connect() {
 }
 
 void ZDTClientBackend::ReceiveLoop() {
-  Buffer scratch(Endianness::BigEndian);
-  scratch.ReserveExact(ZNET_MAX_BUFFER_SIZE);
-  while (receiving_.load(std::memory_order_relaxed)) {
-    scratch.Reset();
-    size_t len = 0;
-    std::shared_ptr<InetAddress> from;
-    RecvResult result = socket_->RecvFrom(scratch.write_cursor_data(),
-                                          scratch.writable_bytes(), len, from);
-    if (result == RecvResult::WouldBlock) {
-      continue;  // receive timeout expired, just re-check the stop flag
-    }
-    if (result == RecvResult::Error) {
-      break;  // socket closed underneath us, shutdown is in progress
-    }
-    if (len == 0 || !from) {
-      continue;
-    }
-    // one peer, so anything from elsewhere is noise on the port
-    if (!(*from == *server_address_)) {
-      continue;
-    }
-    scratch.CommitWrite(len);
-    inbox_->Push(Buffer(scratch.data(), scratch.size(), Endianness::BigEndian),
-                 config_.max_inbox_datagrams);
-    if (on_data_) {
-      on_data_();  // the session has work; do not make it wait out its tick
-    }
-  }
+  ReceiveDatagrams(
+      *socket_, receiving_, on_data_,
+      [this](Buffer& datagram, const std::shared_ptr<InetAddress>& from) {
+        // one peer, so anything from elsewhere is noise on the port
+        if (!(*from == *server_address_)) {
+          return false;
+        }
+        inbox_->Push(
+            Buffer(datagram.data(), datagram.size(), Endianness::BigEndian),
+            config_.max_inbox_datagrams);
+        return true;
+      });
 }
 
 void ZDTClientBackend::StopReceiving() {
@@ -385,29 +403,12 @@ Result ZDTServerBackend::Listen() {
 }
 
 void ZDTServerBackend::ReceiveLoop() {
-  Buffer scratch(Endianness::BigEndian);
-  scratch.ReserveExact(ZNET_MAX_BUFFER_SIZE);
-  while (receiving_.load(std::memory_order_relaxed)) {
-    scratch.Reset();
-    size_t len = 0;
-    std::shared_ptr<InetAddress> from;
-    RecvResult result = socket_->RecvFrom(scratch.write_cursor_data(),
-                                          scratch.writable_bytes(), len, from);
-    if (result == RecvResult::WouldBlock) {
-      continue;  // receive timeout expired, just re-check the stop flag
-    }
-    if (result == RecvResult::Error) {
-      break;  // socket closed underneath us, shutdown is in progress
-    }
-    if (len == 0 || !from) {
-      continue;
-    }
-    scratch.CommitWrite(len);
-    RouteDatagram(scratch, from);
-    if (on_data_) {
-      on_data_();  // a session has work; do not make it wait out its tick
-    }
-  }
+  ReceiveDatagrams(
+      *socket_, receiving_, on_data_,
+      [this](Buffer& datagram, const std::shared_ptr<InetAddress>& from) {
+        RouteDatagram(datagram, from);
+        return true;
+      });
 }
 
 void ZDTServerBackend::RouteDatagram(Buffer& datagram,

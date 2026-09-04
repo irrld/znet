@@ -143,6 +143,9 @@ class ZDTTransportLayer : public TransportLayer {
   // real gap comes back as a NAK. See kZDTTailProbeFloorMs.
   void MaybeTailProbe(TimePoint now);
   std::chrono::steady_clock::duration TailProbeDelay() const;
+  // the probe measures silence after the newest send or the last ack progress;
+  // both restart it, and nothing outstanding means nothing to probe
+  void RearmTailProbe(TimePoint now);
   void PruneSentPackets();
   // expands the record's truncated message_seq to a full SequenceId, using the
   // matching substream's position on that channel as context.
@@ -228,6 +231,9 @@ class ZDTTransportLayer : public TransportLayer {
     // fall off and age out of sent_packets_ on their own.
     TransmissionLog packets;
   };
+  // one more transmission of a reliable message, on a fresh packet_seq that
+  // the message's log picks up; what a retransmit and a probe have in common
+  WireSeq ResendReliable(const MsgKey& key, OutReliable& msg);
   struct Reassembly {
     uint8_t frag_count = 0;
     std::map<uint8_t, std::vector<uint8_t>> fragments;  // frag_index -> bytes
