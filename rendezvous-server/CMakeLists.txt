@@ -3,5 +3,5 @@ project(rendezvous-server LANGUAGES CXX)
 
 add_executable(rendezvous-server main.cc)
 znet_apply_cxx_standard(rendezvous-server)
-target_link_libraries(rendezvous-server PRIVATE znet)
+target_link_libraries(rendezvous-server PRIVATE znet cxxopts)
 

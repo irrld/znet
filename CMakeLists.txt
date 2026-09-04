@@ -26,6 +26,10 @@ endfunction()
 add_subdirectory(vendor/zstd/build/cmake)
 add_subdirectory(znet)
 
+# the option parser the binaries share; header only
+add_library(cxxopts INTERFACE)
+target_include_directories(cxxopts INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/vendor/cxxopts)
+
 # rendezvous server
 add_subdirectory(rendezvous-server)
 
