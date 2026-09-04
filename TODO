@@ -1,62 +1,36 @@
-- [x] InetAddress
-- [x] Buffer
-- [x] Events
-- [x] Server Implementation
-- [x] Client Implementation
-- [x] Compression (zstd)
-- [x] Compression (zlib) (dropped: zstd covers the need and the per-message type byte means another codec can be added later without a wire break)
-- [x] Compression (snappy) (dropped: same reasoning as zlib)
-- [x] TLS
-- [x] Endianness
-- [ ] Saving packet buffer to a file
-- [ ] More events
-- [ ] Better error handling
-- [x] Unit tests
-- [x] More unit tests (suites now: buffer x2, session, encryption, zdt, zdt-unit, locator, tcp-transport, unix-socket, plus per-extension tests)
-- [x] Documentation
-- [ ] Proxy protocol v2 support
-- [x] Unix socket support (POSIX; "unix:/path" in any host string with ConnectionType::TCP, ports ignored, stale socket files taken over on bind)
-- [x] Limit array/vector/string read sizes (ZNET_MAX_READ_ELEMENTS / ZNET_MAX_READ_STRING_LENGTH, plus a bytes-on-hand check that needs no configuration)
-- [x] Connection throttling (IP / CIDR) (ServerOptions::max_attempts_per_source / attempt_window; per-source window at TCP accept and ZDT first contact, bounded table that fails open. The rendezvous server exposes ServerOptions too and adds a per-client request limit with idempotent identify.)
-- [x] Option to dump the received buffer when a packet fails to decode (CommonOptions::dump_on_decode_failure, capped at 512 bytes)
-- [x] Option to close the connection on invalid received packets (CommonOptions::max_invalid_frames, default 16, zero disables; counted per session and surfaced as the invalid_frames metric)
-- [x] Max concurrent connections (ZDT: config max_connections + NoFreeConnections)
-- [x] Peer to peer TCP hole-punching (p2p::tcp::PunchSync and tcp::PeerLocator, kept apart from the ZDT path; no gathering or relay there)
-- [x] Validate IP addresses
-- [x] Public key authentication (ExportKeyingMaterial is the library primitive; examples/auth shows the full pattern with service-signed tokens and a session-bound client signature. Identity policy stays with the application.)
-- [x] Allowlists and denylists (ServerOptions::allowlist / denylist of CIDRBlocks; deny wins, ZDT refuses silently, v4 rules catch v4-mapped v6 sources)
-- [x] Idle timeout and ping-pong (CommonOptions::idle_timeout / keepalive_interval drive both transports; ZDT had it, TCP gained zero-length control frames for ping/pong)
-- [x] Abstract transport
-- [x] Mock transport (tests/session_pair.h: FakeTransport plus a two-session Pair harness over a hand-pumped wire)
-- [ ] Fuzz testing
-- [ ] Sanitizers: ASan/UBSan and TSan jobs in CI, behind a ZNET_SANITIZE option. CI is Release only today, so the Buffer asserts never run there either.
-- [x] Metrics (znet/metrics.h: pull-based session and server snapshots, ZNET_ENABLE_METRICS compile-out; documented in the wiki)
-- [ ] Graceful Disconnects (?)
-- [x] Version Negotiation (ZDT handshake, strict-equality + IncompatibleProtocolVersion)
-- [ ] Feature flag Negotiation (?)
-- [x] Automatic serialization of non-complex types (znet-reflect extension: deduced for aggregates, ZNET_REFLECT for the rest; C++17)
-- [x] Fully asynchronous P2P hole punching using an event-driven I/O model. (p2p::Host: one shared UDP socket, the gather and punch state machines (p2p::internal) on its tick, Gather and Punch never block; tests/p2p_host.cc)
-- [x] P2P mesh: locator stays on the rendezvous and brokers punches to several peers (p2p::PeerLocator over Host; three-player mesh in tests/p2p_host.cc; losing the link ends matchmaking, not the mesh)
-- [x] P2P as distinct steps with typed candidates: gather (Host, Reflexive), exchange (the broker adds Relayed), punch (PunchOffer). The rendezvous protocol is welcome, gathering, ask, offer.
-- [x] API stability tiers (wiki API-Stability page; every public header carries its tier)
-- [x] Rendezvous UDP observation (STUN-lite): observe the real public UDP mapping instead of assuming the NAT preserves the local port. (done the other way round: the client learns it. Host::Gather sends a padded Reflect from the punch socket to the relay and the answer names the mapping; the gathering carries it to the rendezvous as a Reflexive candidate, and the observed-address-plus-claimed-port guess is only the fallback when no reflector answered.)
-- [x] Relay fallback for peers that cannot punch. (p2p::RelayServer: one UDP port for every pairing, each told apart by a four-byte channel header, token-gated two-slot binding, datagrams forwarded verbatim so the ZDT handshake and the session keys stay end to end; the relay reads one byte plus the offline header and holds nothing that decrypts. The rendezvous allocates one per ZDT pairing and hands both peers a Relayed candidate; the punch binds it at once and lets it join the race after relay_delay, so a working direct path always wins.)
-- [ ] Relay: per-allocation rate or byte limit, so one pairing cannot use a relay host's whole uplink. Today only probes are throttled.
-- [ ] Relay: a remote allocation protocol, so a broker can use a relay on another host instead of embedding RelayServer; a standalone relay binary would follow from it.
-- [ ] Gather: flag a symmetric NAT (two reflectors, two mappings) so a punch can go straight to the relay instead of waiting out relay_delay.
-- [x] Add UDP transport (ZDT) and UDP client/server backends, including UDP hole punching for P2P (PunchSyncZDT).
-- [x] Enhance error events for P2P connection failures with granular, actionable reasons. (PeerLocatorFailedEvent with phase Relay/Rendezvous/Punch + Result; PeerNotFoundPacket answers unknown names; ClientConnectionFailedEvent covers a handshake that dies before ready)
-- [x] Check if PeerLocator's destructor automatically joins its internal thread. (it joined via ~Task but deadlocked: RequestStop never woke the cv wait, and the stop-only predicate also made the punch branch unreachable; both fixed, regression tests in tests/locator.cc)
-- [ ] Document thread-safety guarantees and concurrency model for all public APIs.
-- [ ] Comprehensive performance benchmarks and conduct memory usage profiling.
-- [ ] Benchmarks: CPU-cost measurement was removed because it could not be compared honestly. Two problems have to be solved before adding it back, both of which inflated znet: (1) only znet_bench builds and parses an application object per message (make_shared + a full payload copy out, then deserialize into a std::string on the way back), while the comparison benches memcpy into the library on send and just free the buffer on receive without ever materialising a message, so give them equivalent work first; (2) process-wide CPU over delivered messages charges the harness's own hot spin to any library whose pump() is cheap (znet reads one atomic, GNS/RakNet only drain), worth roughly a quarter of znet's figure, while ENet's spin is the protocol work itself, so measure per-thread or park the sender instead of busy-waiting.
-- [x] ZDT: a small message sent while a bulk transfer saturates the link waits ~12.5 ms on clean loopback (raw TCP does 0.03 ms), even on its own channel, because a channel gets a separate sequence space and not a separate queue. (fixed: the staging queue is now one lane per channel, serviced round-robin one message per pass, so a backlogged or window-stalled channel is skipped instead of blocking the rest; loaded-lat 1KB p50 is now 27 us raw / 40 us default; regression test ZDTReliability.BulkBacklogDoesNotDelayAnotherChannel)
-- [x] ZDT: 8 KiB under loss is the weakest cell in the suite, 894 msg/s against 5,374 at 1 KiB, spanning 351..1,497 across five runs, with every congestion probe timing out at 2 s. (fixed: tail-loss probe. The collapse was tail-loss stalls: a lost burst tail cannot be NAKed because nothing later arrives to expose the gap, and the shut window kept the sender from sending anything that would, so every such loss waited out the 100 ms rto_min. The transport now resends the newest unacked message after max(2*srtt, 10 ms) of ack silence, doubling per probe while the silence lasts; any resulting ack advances the peer's horizon and surfaces the real gap as a NAK. Under netem loss=5: 8 KiB steady 1385 -> 3512 msg/s, 1 KiB steady 2423 -> 13574 msg/s, loaded-lat p50 84 ms -> 8.5 ms. New tail_probes metric; regression test ZDTReliability.TailLossRecoversBeforeTheRtoFloor. Remaining known limit: the delay signal still pins cwnd at 3-4 on microsecond-RTT links, see the note in zdt_transport.cc.)
-- [ ] Security audit for the encryption layer
-- [ ] Validate the peer's DH public key: d2i_PUBKEY takes whatever arrives and EVP_PKEY_derive_set_peer does not check it, so a small-order key passes. Parameter mismatch is already caught by OpenSSL; EVP_PKEY_public_check covers the rest.
-- [ ] Perf: ZDTInbox still allocates one right-sized Buffer per datagram; a freelist recycling drained buffers (their allocations survive Reset) would make the steady state allocation-free. The copy already moved outside the lock and the parse-side wrapper copy is gone since the inbox stores parse-ready Buffers.
-- [ ] Perf: ZDT delivery copies every record into its own make_shared<Buffer> (zdt_transport.cc OnRecord); records could be owning slices of one shared per-datagram backing store instead. Bigger refactor, matters most for many small messages.
-- [x] Perf: SentInfo is ~1.5 KB copied by value per datagram into sent_packets_ and again out in AckPacket; reordering MsgKey members shrinks it 24 -> 16 bytes, and the copies can go entirely (fixed: MsgKey packs byte members together, 24 -> 16 bytes, SentInfo 1552 -> 1040; SendBatch fills the sent_packets_ entry through a reference instead of assigning a local in; AckPacket walks the entry in place, skipping its own packet_seq in the retire loop and erasing itself last. Remaining per-datagram cost is the ~1 KB map node and its zero-init, inherent to the fixed-capacity key array.)
-- [x] Perf: TCP receive copies every inbound byte twice (recv result wrapped in a Buffer, then each frame copied again in ReadBuffer); parsing frames straight out of data_ would halve it (fixed: a big-endian Buffer member is the accumulator, recv appends at its write cursor, ReadBuffer parses frames from the read cursor and the new Buffer::Compact() reclaims the consumed front; one copy per frame, into the Buffer handed up. The old defensive oversize-recv and carry-over checks fell away: recv is bounded by the free space, and any frame passing the length check fits the reservation, so a partial frame can never wedge it full. New TCPFraming tests cover byte-at-a-time splits, coalesced frames, and the oversized-length close; BufferCompact tests pin the new primitive.)
-- [ ] Perf: switch Buffer's data_ from new[]/delete[] to malloc/realloc/free so growth can happen in place and skip the memcpy; also makes malloc_usable_size legal if harvesting size-class slack ever looks worthwhile. Contained change (data_ never escapes Buffer), but low payoff while the hot paths reuse scratch buffers and no longer reallocate in steady state.
-- [x] Refactor znet.h into smaller, modular headers for specific functionalities.
+Open items. What is done lives in git history.
+
+Transport
+- [ ] ZDT: at 64 B under loss, retransmits outnumber NAKs about seven to one: timeouts fire on datagrams whose acks were merely held by a busy receiver. Throughput sits at the window cap regardless, so this costs bandwidth, not rate. A receiver holding acks for a whole verdict window likewise reads as a queue, which costs the odd 1 KiB rep. Both want the ack to report how long it was held, QUIC style, and the sender to subtract it; a wire change.
+- [ ] ZDT: the queueing test is relative, so at microsecond round trips (loopback, same rack) the ordinary cost of data in flight reads as a queue and pins the window low. An absolute margin opens it there but costs ~30% at 64 B; see ZDTRttEstimator::IsQueueing.
+- [ ] Graceful disconnects (?)
+- [ ] Feature flag negotiation (?)
+
+P2P
+- [ ] IPv6 hole punching. Gather is IPv4-only (LocalCandidates uses GetLocalAddresses(IPv4) and the Host opens one family); gather v6 host candidates, offer them, and punch over v6, dual-stack or a second socket. The reflector already round-trips v6 addresses. Untestable locally for now.
+- [ ] NAT-type detection from two reflectors on distinct IPs. Two mappings that agree is endpoint-independent (punchable); two that differ is address- or port-dependent (symmetric, go straight to relay and skip relay_delay). Surface the verdict in the GatherCallback result. Needs the broker to advertise two distinct-IP reflectors, so settle the reflector-list config while the P2P API is open. Optional: speak RFC 5389 STUN Binding so public STUN servers work as reflectors, not only our RelayServer.
+- [ ] Port prediction for symmetric NATs whose mapping is sequential: predict the next N external ports and punch a spread before falling back to the relay.
+- [ ] Connection migration: finish it on the wire foundation (43ac195). Done: kFlagHasCid + an 8-byte connection id (the sender's guid) in the online header, PathChallenge/PathResponse offline messages, ZDTOptions::enable_connection_migration to emit the id, header round-trip tests. Remaining, in order: (1) server backend routes by the peer's guid on an address miss and, on a known id from a new address, sends a PathChallenge and only moves the session's send target and re-keys routes_ once a PathResponse comes back from that address; (2) the challenged side replies to a PathChallenge (client backend, off its own socket); (3) the client can rebind its socket to a new local address without dropping the session, which is the real migration trigger and the genuinely tricky part (a receive thread is parked on the old fd); (4) the same routing in p2p::Host; (5) the version gate or a handshake capability bit so a migration-capable peer never stamps ids at one that cannot parse them, then bump the protocol; (6) a loopback rebind test end to end. Security: the id is a random 64-bit guid (unguessable off-path) and the path challenge proves liveness before the send target moves, but an on-path attacker who sees the id and answers from a new address can redirect a session's egress (a DoS, not a data leak, since payloads stay AEAD-protected); document it and consider a token-keyed tag. Repunch is the fallback where re-pathing cannot recover.
+- [ ] Relay: per-allocation rate or byte limit, so one pairing cannot use a relay host's whole uplink; only probes are throttled today.
+- [ ] Relay: a remote allocation protocol, so a broker can use a relay on another host instead of embedding RelayServer; a standalone relay binary follows from it.
+
+Security
+- [ ] Audit the encryption layer.
+- [ ] Validate the peer's DH public key: d2i_PUBKEY takes whatever arrives and EVP_PKEY_derive_set_peer does not check it, so a small-order key passes. EVP_PKEY_public_check covers what OpenSSL's parameter check does not.
+
+Performance
+- [ ] ZDTInbox allocates one right-sized Buffer per datagram; a freelist recycling drained buffers would make the steady state allocation-free.
+- [ ] ZDT delivery copies every record into its own Buffer (OnRecord); records could be owning slices of one per-datagram backing store. Matters most for many small messages.
+- [ ] Buffer's data_ could use malloc/realloc so growth happens in place. Contained, but low payoff while the hot paths reuse scratch buffers.
+
+Benchmarks
+- [ ] CPU cost per message, once it can be compared honestly: only znet-bench builds and parses an application message where the others hand a pointer to the library, and process-wide CPU charges the harness's own spin to whichever library pumps cheaply. Give the comparison benches equivalent work and measure per thread.
+- [ ] Memory profiling.
+
+Tooling and docs
+- [ ] Sanitizers in CI (ASan/UBSan, TSan) behind a ZNET_SANITIZE option; CI is Release only, so the Buffer asserts never run there either.
+- [ ] Fuzz testing.
+- [ ] Document thread-safety guarantees for every public API.
+- [ ] Proxy protocol v2 support.
+- [ ] Saving a packet buffer to a file.
+- [ ] More events; better error handling.
