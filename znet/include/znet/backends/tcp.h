@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: internal (see the wiki, API Stability)
 
 #ifndef ZNET_BACKENDS_TCP_H_
 #define ZNET_BACKENDS_TCP_H_

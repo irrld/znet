@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: stable (see the wiki, API Stability)
 
 #ifndef ZNET_INET_ADDR_H_
 #define ZNET_INET_ADDR_H_
@@ -91,6 +92,10 @@ class InetAddress {
   ZNET_NODISCARD virtual PortNumber port() const = 0;
 
   ZNET_NODISCARD virtual std::unique_ptr<InetAddress> WithPort(PortNumber port) const = 0;
+
+  /** @brief Same host and port; for a unix path, the same path. */
+  bool operator==(const InetAddress& other) const;
+  bool operator!=(const InetAddress& other) const { return !(*this == other); }
 
   static std::unique_ptr<InetAddress> from(const std::string& host, PortNumber port);
   static std::unique_ptr<InetAddress> from(sockaddr* addr);

@@ -7,13 +7,18 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: experimental (see the wiki, API Stability)
 
 #ifndef ZNET_P2P_H_
 #define ZNET_P2P_H_
 
-#include "znet/p2p/dialer.h"
+#include "znet/p2p/events.h"
 #include "znet/p2p/host.h"
 #include "znet/p2p/locator.h"
+#include "znet/p2p/punch.h"
+#include "znet/p2p/relay_server.h"
 #include "znet/p2p/rendezvous_server.h"
+#include "znet/p2p/tcp/locator.h"
+#include "znet/p2p/tcp/punch.h"
 
 #endif  // ZNET_P2P_H_

@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: internal (see the wiki, API Stability)
 
 //
 // The platform's socket calls behind one signature each.
@@ -20,11 +21,13 @@
 #ifndef ZNET_DETAIL_SOCKET_OPS_H_
 #define ZNET_DETAIL_SOCKET_OPS_H_
 
+#include "znet/compat.h"
 #include "znet/detail/platform.h"
 #include "znet/detail/sys_net.h"
 #include "znet/types.h"
 
 #include <cstddef>
+#include <cstring>
 #include <limits>
 
 #ifndef ZNET_TARGET_WIN
@@ -218,6 +221,29 @@ inline bool WaitUntilWritable(SocketHandle socket, int timeout_ms) {
 #endif
 }
 
+/**
+ * @brief Same host and port, ignoring IPv6 flow and scope fields: the kernel
+ *        fills those per datagram, and a peer is the same peer regardless.
+ *        What InetAddress::operator== and the relay's slot match both use.
+ */
+inline bool SameEndpoint(const sockaddr* a, const sockaddr* b) {
+  if (a->sa_family != b->sa_family) {
+    return false;
+  }
+  if (a->sa_family == AF_INET) {
+    const auto* x = reinterpret_cast<const sockaddr_in*>(a);
+    const auto* y = reinterpret_cast<const sockaddr_in*>(b);
+    return x->sin_port == y->sin_port &&
+           std::memcmp(&x->sin_addr, &y->sin_addr, sizeof(x->sin_addr)) == 0;
+  }
+  if (a->sa_family == AF_INET6) {
+    const auto* x = reinterpret_cast<const sockaddr_in6*>(a);
+    const auto* y = reinterpret_cast<const sockaddr_in6*>(b);
+    return x->sin6_port == y->sin6_port &&
+           std::memcmp(&x->sin6_addr, &y->sin6_addr, sizeof(x->sin6_addr)) == 0;
+  }
+  return false;
+}
 
 }  // namespace znet
 

@@ -14,6 +14,7 @@
 // the existing send/recv pipeline as a TransportLayer, so encryption, compression
 // and serialization are unchanged. See docs/zdt-design.md for the full spec.
 //
+// API stability: internal (see the wiki, API Stability)
 
 #ifndef ZNET_BACKENDS_ZDT_H_
 #define ZNET_BACKENDS_ZDT_H_

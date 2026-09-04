@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: internal (see the wiki, API Stability)
 
 //
 // A debug-only check that a group of methods is never entered by two threads at

@@ -11,6 +11,7 @@
 // The per-peer ZDT transport: reliability, congestion control, fragmentation,
 // ordering and keepalive for one connection.
 //
+// API stability: internal (see the wiki, API Stability)
 
 #ifndef ZNET_BACKENDS_ZDT_ZDT_TRANSPORT_H_
 #define ZNET_BACKENDS_ZDT_ZDT_TRANSPORT_H_
@@ -98,6 +99,10 @@ class ZDTTransportLayer : public TransportLayer {
     }
   };
 
+  // the datagram budget, less the relay header when this connection has one
+  ZNET_NODISCARD uint16_t DatagramMTU() const;
+  // starts a datagram: the relay header when this connection has one
+  void BeginDatagram(Buffer& datagram) const;
   void DrainSocket();     // client-side: recvfrom own socket -> inbox
   void ProcessInbound();  // parse queued raw datagrams (worker thread)
   void FlushOutbound();   // send queued NEW messages (worker thread)

@@ -1,0 +1,179 @@
+//
+//    Copyright 2026 Metehan Gezer
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+
+//
+// The gather step: host candidates off the interfaces, the reflexive one off
+// a relay's control port, and a punch that runs on what was gathered.
+//
+
+#include "p2p_probes.h"
+#include "znet/init.h"
+#include "znet/p2p/host.h"
+#include "znet/p2p/internal/gather.h"
+#include "znet/p2p/relay_server.h"
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+using namespace znet;
+using znet::test::GatherOutcome;
+using znet::test::PunchOutcome;
+using znet::test::WaitUntil;
+
+namespace {
+
+std::unique_ptr<p2p::RelayServer> StartRelay() {
+  p2p::RelayServerConfig config;
+  config.bind_address = "127.0.0.1";
+  config.port = 0;
+  std::unique_ptr<p2p::RelayServer> relay(new p2p::RelayServer(config));
+  EXPECT_EQ(relay->Start(), Result::Success);
+  return relay;
+}
+
+p2p::HostConfig LoopbackHost() {
+  p2p::HostConfig config;
+  config.bind_address = "127.0.0.1";
+  return config;
+}
+
+}  // namespace
+
+TEST(LocalCandidates, EveryAddressCarriesThePort) {
+  ASSERT_EQ(Init(), Result::Success);
+  const auto candidates = p2p::internal::LocalCandidates(4242);
+  ASSERT_FALSE(candidates.empty());
+  for (const auto& candidate : candidates) {
+    EXPECT_EQ(candidate.type, p2p::CandidateType::Host);
+    EXPECT_EQ(candidate.address->port(), 4242);
+    EXPECT_EQ(candidate.relay_token, 0u);
+  }
+}
+
+TEST(HostGather, LearnsThePublicMappingFromAReflector) {
+  ASSERT_EQ(Init(), Result::Success);
+  auto relay = StartRelay();
+  p2p::Host host{LoopbackHost()};
+  ASSERT_EQ(host.Start(), Result::Success);
+
+  GatherOutcome outcome;
+  host.Gather({relay->address()}, std::chrono::seconds(2),
+              outcome.Callback());
+  ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
+  EXPECT_EQ(outcome.result, Result::Success);
+  ASSERT_EQ(outcome.CountOf(p2p::CandidateType::Reflexive), 1);
+  // on loopback the mapping is the socket itself, and it comes first
+  const auto candidates = outcome.Candidates();
+  EXPECT_EQ(candidates.front().type, p2p::CandidateType::Reflexive);
+  EXPECT_EQ(candidates.front().address->readable(),
+            "127.0.0.1:" + std::to_string(host.punch_port()));
+  host.Stop();
+  relay->Stop();
+}
+
+TEST(HostGather, WithoutReflectorsReportsTheHostCandidates) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::Host host{LoopbackHost()};
+  ASSERT_EQ(host.Start(), Result::Success);
+
+  GatherOutcome outcome;
+  host.Gather({}, std::chrono::seconds(2), outcome.Callback());
+  ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
+  EXPECT_EQ(outcome.result, Result::Success);
+  EXPECT_EQ(outcome.CountOf(p2p::CandidateType::Reflexive), 0);
+  EXPECT_GE(outcome.CountOf(p2p::CandidateType::Host), 1);
+  for (const auto& candidate : outcome.Candidates()) {
+    EXPECT_EQ(candidate.address->port(), host.punch_port());
+  }
+  host.Stop();
+}
+
+TEST(HostGather, ADeadReflectorTimesOutWithTheHostCandidates) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::Host host{LoopbackHost()};
+  ASSERT_EQ(host.Start(), Result::Success);
+
+  GatherOutcome outcome;
+  const auto started = std::chrono::steady_clock::now();
+  host.Gather({InetAddress::from("203.0.113.1", 9)},
+              std::chrono::milliseconds(300), outcome.Callback());
+  ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
+  EXPECT_LT(std::chrono::steady_clock::now() - started,
+            std::chrono::seconds(2));
+  EXPECT_EQ(outcome.result, Result::Timeout);
+  EXPECT_EQ(outcome.CountOf(p2p::CandidateType::Reflexive), 0);
+  EXPECT_GE(outcome.CountOf(p2p::CandidateType::Host), 1)
+      << "what was learned locally is still worth handing over";
+  host.Stop();
+}
+
+TEST(HostGather, StoppingTheHostFailsAPendingGather) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::Host host{LoopbackHost()};
+  ASSERT_EQ(host.Start(), Result::Success);
+  GatherOutcome outcome;
+  host.Gather({InetAddress::from("203.0.113.1", 9)}, std::chrono::seconds(30),
+              outcome.Callback());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  host.Stop();
+  ASSERT_TRUE(outcome.done.load());
+  EXPECT_EQ(outcome.result, Result::AlreadyStopped);
+}
+
+// the whole client-side flow without a broker: both sides gather off the
+// same reflector, swap what they learned, and punch on it
+TEST(HostGather, GatheredCandidatesCarryAPunch) {
+  ASSERT_EQ(Init(), Result::Success);
+  auto relay = StartRelay();
+  p2p::Host a{LoopbackHost()};
+  p2p::Host b{LoopbackHost()};
+  ASSERT_EQ(a.Start(), Result::Success);
+  ASSERT_EQ(b.Start(), Result::Success);
+
+  GatherOutcome gathered_a;
+  GatherOutcome gathered_b;
+  a.Gather({relay->address()}, std::chrono::seconds(2),
+           gathered_a.Callback());
+  b.Gather({relay->address()}, std::chrono::seconds(2),
+           gathered_b.Callback());
+  ASSERT_TRUE(WaitUntil(
+      [&]() { return gathered_a.done.load() && gathered_b.done.load(); },
+      5000));
+  ASSERT_EQ(gathered_a.result, Result::Success);
+  ASSERT_EQ(gathered_b.result, Result::Success);
+
+  // the exchange, by hand
+  p2p::PunchOffer to_b;
+  to_b.candidates = gathered_b.Candidates();
+  to_b.punch_id = 11;
+  to_b.is_initiator = true;
+  p2p::PunchOffer to_a;
+  to_a.candidates = gathered_a.Candidates();
+  to_a.punch_id = 11;
+  to_a.is_initiator = false;
+
+  PunchOutcome at_a;
+  PunchOutcome at_b;
+  a.Punch(to_b, at_a.Callback());
+  b.Punch(to_a, at_b.Callback());
+  ASSERT_TRUE(WaitUntil([&]() { return at_a.done.load() && at_b.done.load(); },
+                        12000));
+  EXPECT_EQ(at_a.result, Result::Success);
+  EXPECT_EQ(at_b.result, Result::Success);
+  a.Stop();
+  b.Stop();
+  relay->Stop();
+}

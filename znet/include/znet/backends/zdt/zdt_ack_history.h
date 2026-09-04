@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: internal (see the wiki, API Stability)
 
 //
 // What a ZDT receiver remembers about which datagrams arrived, and how it

@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: internal (see the wiki, API Stability)
 
 //
 // A minimal std::format stand-in for pre-C++20 builds.

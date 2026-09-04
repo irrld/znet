@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: stable (see the wiki, API Stability)
 
 //
 // How one close should be performed. Keyed like SendOptions, and for the same

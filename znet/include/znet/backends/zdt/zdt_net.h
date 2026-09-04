@@ -12,6 +12,7 @@
 // socket wrapper and the thread-safe queue a receive loop hands datagrams to.
 // Neither knows anything about the ZDT protocol.
 //
+// API stability: internal (see the wiki, API Stability)
 
 #ifndef ZNET_BACKENDS_ZDT_ZDT_NET_H_
 #define ZNET_BACKENDS_ZDT_ZDT_NET_H_
@@ -40,6 +41,9 @@
 #include <vector>
 #include "znet/backends/zdt/zdt_wire.h"
 
+struct sockaddr;
+struct sockaddr_storage;
+
 namespace znet {
 namespace backends {
 
@@ -57,7 +61,22 @@ class UDPSocket {
   Result Open(InetProtocolVersion ipv);
   Result Bind(const InetAddress& addr);
 
-  bool SendTo(const InetAddress& addr, const void* data, size_t len);
+  /**
+   * @brief The raw pair: the source comes back as the sockaddr the kernel
+   *        filled, and can go straight back into SendTo. For a loop that only
+   *        compares sources or answers them, since building an InetAddress
+   *        costs an allocation and an inet_ntop per datagram.
+   */
+  bool SendTo(const sockaddr* addr, SockLen addr_len, const void* data,
+              size_t len);
+  RecvResult RecvFrom(void* data, size_t cap, size_t& out_len,
+                      sockaddr_storage& out_from, SockLen& out_from_len);
+
+  /** @brief The same pair on an InetAddress; each is a wrapper over the raw
+   *         one above. */
+  bool SendTo(const InetAddress& addr, const void* data, size_t len) {
+    return SendTo(addr.handle_ptr(), addr.addr_size(), data, len);
+  }
   RecvResult RecvFrom(void* data, size_t cap, size_t& out_len,
                       std::shared_ptr<InetAddress>& out_from);
 

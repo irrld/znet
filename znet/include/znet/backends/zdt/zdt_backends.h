@@ -12,6 +12,7 @@
 // receive threads and (server side) demultiplexing datagrams to per-peer
 // transports.
 //
+// API stability: internal (see the wiki, API Stability)
 
 #ifndef ZNET_BACKENDS_ZDT_ZDT_BACKENDS_H_
 #define ZNET_BACKENDS_ZDT_ZDT_BACKENDS_H_

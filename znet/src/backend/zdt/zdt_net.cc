@@ -59,12 +59,11 @@ Result UDPSocket::Bind(const InetAddress& addr) {
   return Result::Success;
 }
 
-bool UDPSocket::SendTo(const InetAddress& addr, const void* data, size_t len) {
-  ssize_t n =
-      SocketSendTo(handle(), data, len, addr.handle_ptr(), addr.addr_size());
+bool UDPSocket::SendTo(const sockaddr* addr, SockLen addr_len,
+                       const void* data, size_t len) {
+  ssize_t n = SocketSendTo(handle(), data, len, addr, addr_len);
   if (n < 0) {
-    ZNET_LOG_DEBUG("ZDT: sendto {} failed: {}", addr.readable(),
-                   GetLastErrorInfo());
+    ZNET_LOG_DEBUG("ZDT: sendto failed: {}", GetLastErrorInfo());
     return false;
   }
   return static_cast<size_t>(n) == len;
@@ -73,9 +72,21 @@ bool UDPSocket::SendTo(const InetAddress& addr, const void* data, size_t len) {
 RecvResult UDPSocket::RecvFrom(void* data, size_t cap, size_t& out_len,
                                std::shared_ptr<InetAddress>& out_from) {
   sockaddr_storage from{};
-  socklen_t from_len = sizeof(from);
+  SockLen from_len = 0;
+  const RecvResult result = RecvFrom(data, cap, out_len, from, from_len);
+  if (result == RecvResult::Received) {
+    out_from = std::shared_ptr<InetAddress>(
+        InetAddress::from(reinterpret_cast<sockaddr*>(&from)));
+  }
+  return result;
+}
+
+RecvResult UDPSocket::RecvFrom(void* data, size_t cap, size_t& out_len,
+                               sockaddr_storage& out_from,
+                               SockLen& out_from_len) {
+  socklen_t from_len = sizeof(out_from);
   ssize_t n = SocketRecvFrom(handle(), data, cap,
-                             reinterpret_cast<sockaddr*>(&from), &from_len);
+                             reinterpret_cast<sockaddr*>(&out_from), &from_len);
   if (n < 0) {
 #ifdef ZNET_TARGET_WIN
     int err = WSAGetLastError();
@@ -90,8 +101,7 @@ RecvResult UDPSocket::RecvFrom(void* data, size_t cap, size_t& out_len,
     return RecvResult::Error;
   }
   out_len = static_cast<size_t>(n);
-  out_from = std::shared_ptr<InetAddress>(
-      InetAddress::from(reinterpret_cast<sockaddr*>(&from)));
+  out_from_len = static_cast<SockLen>(from_len);
   return RecvResult::Received;
 }
 

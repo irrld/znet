@@ -123,6 +123,17 @@ bool ReadOfflineHeader(Buffer& buffer, ZDTOfflineMsg& out_id) {
   return true;
 }
 
+bool PeekOfflineHeader(const uint8_t* data, size_t len, ZDTOfflineMsg& out_id) {
+  if (len < kZDTOfflineHeaderSize || (data[0] & kFlagOnline) != 0) {
+    return false;
+  }
+  if (std::memcmp(data + 1, kZDTMagic.data(), kZDTMagic.size()) != 0) {
+    return false;
+  }
+  out_id = static_cast<ZDTOfflineMsg>(data[0]);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Return-routability cookie
 // ---------------------------------------------------------------------------

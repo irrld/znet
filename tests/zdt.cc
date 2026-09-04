@@ -26,7 +26,6 @@
 #include "znet/codec.h"
 #include "znet/event.h"
 #include "znet/init.h"
-#include "znet/p2p.h"
 #include "znet/packet.h"
 #include "znet/packet_handler.h"
 #include "znet/server.h"
@@ -2463,65 +2462,6 @@ TEST(ZDTSecurity, NoAmplificationOnRequest1) {
       << "Reply1 was larger than Request1 (amplification vector)";
 
   ctx->server->Stop();
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-}
-
-// --- P2P UDP hole-punching ----------------------------------------------------
-
-static std::shared_ptr<InetAddress> LocalAddr(PortNumber port) {
-  return std::shared_ptr<InetAddress>(InetAddress::from("127.0.0.1", port));
-}
-
-// two peers punch to each other and must both reach Ready(), which requires the
-// full encryption handshake (reliable app-level packets) to flow both ways over
-// the punched ZDT connection. on loopback there is no NAT, so this exercises the
-// punch state machine + handshake rather than real traversal.
-TEST(ZDTP2P, HolePunchLoopbackReachesReady) {
-  ASSERT_EQ(Init(), Result::Success);
-
-  PortNumber port_a = FreeUdpPort();
-  PortNumber port_b = FreeUdpPort();
-  while (port_b == port_a) {
-    port_b = FreeUdpPort();
-  }
-
-  const uint64_t punch_id = 0x1234;
-  bool init_a = p2p::IsInitiator(punch_id, "peerA", "peerB");
-  bool init_b = p2p::IsInitiator(punch_id, "peerB", "peerA");
-  ASSERT_NE(init_a, init_b) << "exactly one peer must be the initiator";
-
-  std::shared_ptr<PeerSession> session_a;
-  std::shared_ptr<PeerSession> session_b;
-  Result result_a = Result::Failure;
-  Result result_b = Result::Failure;
-
-  std::thread thread_a([&]() {
-    session_a = p2p::PunchSync(LocalAddr(port_a), LocalAddr(port_b), init_a,
-                               ConnectionType::ZDT,
-                               std::chrono::milliseconds(5000), &result_a);
-  });
-  std::thread thread_b([&]() {
-    session_b = p2p::PunchSync(LocalAddr(port_b), LocalAddr(port_a), init_b,
-                               ConnectionType::ZDT,
-                               std::chrono::milliseconds(5000), &result_b);
-  });
-  thread_a.join();
-  thread_b.join();
-
-  ASSERT_EQ(result_a, Result::Success) << "peer A punch failed";
-  ASSERT_EQ(result_b, Result::Success) << "peer B punch failed";
-  ASSERT_TRUE(session_a && session_b);
-
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (std::chrono::steady_clock::now() < deadline &&
-         !(session_a->IsReady() && session_b->IsReady())) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-  EXPECT_TRUE(session_a->IsReady()) << "peer A never completed the ZDT session";
-  EXPECT_TRUE(session_b->IsReady()) << "peer B never completed the ZDT session";
-
-  session_a->Close();
-  session_b->Close();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 

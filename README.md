@@ -78,7 +78,9 @@ everything else.
 * [Extensions](https://github.com/teoncreative/znet/wiki/Extensions): optional
   add-ons for smaller packets, automatic serialization and engine types
 * [Peer-to-Peer](https://github.com/teoncreative/znet/wiki/Peer-to-Peer):
-  rendezvous and hole punching
+  gathering, rendezvous, hole punching and the relay fallback
+* [API Stability](https://github.com/teoncreative/znet/wiki/API-Stability):
+  which parts of the API may change, and how much notice you get
 
 ## Benchmarks
 

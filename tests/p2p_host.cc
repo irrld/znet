@@ -13,10 +13,11 @@
 // socket, and the full mesh flow through an in-process rendezvous.
 //
 
+#include "p2p_probes.h"
 #include "znet/init.h"
-#include "znet/p2p/dialer.h"
 #include "znet/p2p/host.h"
 #include "znet/p2p/locator.h"
+#include "znet/p2p/punch.h"
 #include "znet/p2p/rendezvous_server.h"
 #include "znet/packet.h"
 #include "znet/packet_handler.h"
@@ -36,85 +37,33 @@ using namespace znet;
 
 namespace {
 
-template <typename Pred>
-bool WaitUntil(Pred pred, int ms) {
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-  while (!pred() && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-  return pred();
-}
-
-// one StartPunch outcome, collected thread-safely off the host's thread
-struct PunchOutcome {
-  std::mutex mutex;
-  Result result = Result::Failure;
-  std::shared_ptr<PeerSession> session;
-  std::atomic<bool> done{false};
-
-  p2p::Host::PunchCallback Callback() {
-    return [this](Result r, std::shared_ptr<PeerSession> s) {
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        result = r;
-        session = std::move(s);
-      }
-      done = true;
-    };
-  }
-
-  std::shared_ptr<PeerSession> Session() {
-    std::lock_guard<std::mutex> lock(mutex);
-    return session;
-  }
-};
+using znet::test::PunchOutcome;
+using znet::test::WaitUntil;
 
 std::shared_ptr<InetAddress> HostAddr(const p2p::Host& host) {
   return InetAddress::from("127.0.0.1", host.punch_port());
 }
 
-// the test packet the punched sessions speak
-enum MeshPacketType : PacketId { kPacketNote = 1 };
-
-class NotePacket : public Packet {
- public:
-  NotePacket() : Packet(kPacketNote) {}
-  std::string text;
-};
-
-class NoteSerializer : public PacketSerializer<NotePacket> {
- public:
-  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<NotePacket> packet,
-                                         std::shared_ptr<Buffer> buffer) override {
-    buffer->WriteString(packet->text);
-    return buffer;
+// an offer naming the peer at every address given, as a broker would
+p2p::PunchOffer Offer(std::vector<std::shared_ptr<InetAddress>> addresses,
+                      uint64_t punch_id, bool is_initiator,
+                      std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+  p2p::PunchOffer offer;
+  for (auto& address : addresses) {
+    p2p::Candidate candidate;
+    candidate.type = p2p::CandidateType::Reflexive;
+    candidate.address = std::move(address);
+    offer.candidates.push_back(std::move(candidate));
   }
-  std::shared_ptr<NotePacket> DeserializeTyped(
-      std::shared_ptr<Buffer> buffer) override {
-    auto packet = std::make_shared<NotePacket>();
-    packet->text = buffer->ReadString();
-    return packet;
-  }
-};
-
-std::shared_ptr<Codec> MakeNoteCodec() {
-  auto codec = std::make_shared<Codec>();
-  codec->Add(kPacketNote, std::make_unique<NoteSerializer>());
-  return codec;
+  offer.punch_id = punch_id;
+  offer.is_initiator = is_initiator;
+  offer.timeout = timeout;
+  return offer;
 }
 
-class NoteCollector : public PacketHandler<NoteCollector, NotePacket> {
- public:
-  void OnPacket(std::shared_ptr<NotePacket> packet) {
-    std::lock_guard<std::mutex> lock(mutex);
-    notes.push_back(packet->text);
-    count++;
-  }
-  std::mutex mutex;
-  std::vector<std::string> notes;
-  std::atomic<int> count{0};
-};
+using znet::test::MakeNoteCodec;
+using znet::test::NoteCollector;
+using znet::test::NotePacket;
 
 bool BothReady(PunchOutcome& a, PunchOutcome& b) {
   auto sa = a.Session();
@@ -126,7 +75,7 @@ bool BothReady(PunchOutcome& a, PunchOutcome& b) {
 
 TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Host::Config config;
+  p2p::HostConfig config;
   config.bind_address = "127.0.0.1";
   p2p::Host a{config};
   p2p::Host b{config};
@@ -137,10 +86,10 @@ TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
   std::shared_ptr<InetAddress> dead = InetAddress::from("203.0.113.1", 9);
   PunchOutcome at_a;
   PunchOutcome at_b;
-  a.StartPunch({dead, HostAddr(b)}, 7, /*is_initiator=*/true,
-               std::chrono::seconds(10), at_a.Callback());
-  b.StartPunch({dead, HostAddr(a)}, 7, /*is_initiator=*/false,
-               std::chrono::seconds(10), at_b.Callback());
+  a.Punch(Offer({dead, HostAddr(b)}, 7, /*is_initiator=*/true),
+               at_a.Callback());
+  b.Punch(Offer({dead, HostAddr(a)}, 7, /*is_initiator=*/false),
+               at_b.Callback());
 
   ASSERT_TRUE(WaitUntil([&]() { return at_a.done.load() && at_b.done.load(); },
                         12000));
@@ -170,7 +119,7 @@ TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
 
 TEST(P2PHost, ThreePeersShareOneSocketEach) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Host::Config config;
+  p2p::HostConfig config;
   config.bind_address = "127.0.0.1";
   p2p::Host a{config};
   p2p::Host b{config};
@@ -184,14 +133,10 @@ TEST(P2PHost, ThreePeersShareOneSocketEach) {
   PunchOutcome a_to_c;
   PunchOutcome b_to_a;
   PunchOutcome c_to_a;
-  a.StartPunch({HostAddr(b)}, 1, true, std::chrono::seconds(10),
-               a_to_b.Callback());
-  a.StartPunch({HostAddr(c)}, 2, true, std::chrono::seconds(10),
-               a_to_c.Callback());
-  b.StartPunch({HostAddr(a)}, 1, false, std::chrono::seconds(10),
-               b_to_a.Callback());
-  c.StartPunch({HostAddr(a)}, 2, false, std::chrono::seconds(10),
-               c_to_a.Callback());
+  a.Punch(Offer({HostAddr(b)}, 1, true), a_to_b.Callback());
+  a.Punch(Offer({HostAddr(c)}, 2, true), a_to_c.Callback());
+  b.Punch(Offer({HostAddr(a)}, 1, false), b_to_a.Callback());
+  c.Punch(Offer({HostAddr(a)}, 2, false), c_to_a.Callback());
 
   ASSERT_TRUE(WaitUntil(
       [&]() {
@@ -235,16 +180,57 @@ TEST(P2PHost, ThreePeersShareOneSocketEach) {
   c.Stop();
 }
 
+// a callback handed to a host that is stopping must still be resolved:
+// Stop() drains what was queued and refuses what comes after, with no gap
+// in between for a request to fall through
+TEST(P2PHost, StopResolvesEveryRequestOrRefusesIt) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::HostConfig config;
+  config.bind_address = "127.0.0.1";
+  p2p::Host host{config};
+  ASSERT_EQ(host.Start(), Result::Success);
+  std::atomic<int> resolved{0};
+  std::atomic<bool> stop{false};
+  std::thread caller([&]() {
+    std::shared_ptr<InetAddress> dead = InetAddress::from("203.0.113.1", 9);
+    while (!stop.load()) {
+      host.Punch(Offer({dead}, 4, true, std::chrono::seconds(30)),
+                      [&](Result, std::shared_ptr<PeerSession>) { resolved++; });
+      host.Gather({dead}, std::chrono::seconds(30),
+                  [&](Result, std::vector<p2p::Candidate>) { resolved++; });
+    }
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  host.Stop();
+  stop = true;
+  caller.join();
+  // every request the caller made either resolved before Stop() returned or
+  // was refused on the spot afterwards; count them against what was issued
+  // by issuing two more, which must be refused synchronously
+  const int before = resolved.load();
+  host.Punch(Offer({InetAddress::from("203.0.113.1", 9)}, 5, true),
+                  [&](Result r, std::shared_ptr<PeerSession>) {
+                    EXPECT_EQ(r, Result::AlreadyStopped);
+                    resolved++;
+                  });
+  host.Gather({}, std::chrono::seconds(1),
+              [&](Result r, std::vector<p2p::Candidate>) {
+                EXPECT_EQ(r, Result::AlreadyStopped);
+                resolved++;
+              });
+  EXPECT_EQ(resolved.load(), before + 2);
+}
+
 TEST(P2PHost, PunchTowardNothingTimesOut) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Host::Config config;
+  p2p::HostConfig config;
   config.bind_address = "127.0.0.1";
   p2p::Host host{config};
   ASSERT_EQ(host.Start(), Result::Success);
 
   PunchOutcome outcome;
   std::shared_ptr<InetAddress> dead = InetAddress::from("203.0.113.1", 9);
-  host.StartPunch({dead}, 3, true, std::chrono::milliseconds(300),
+  host.Punch(Offer({dead}, 3, true, std::chrono::milliseconds(300)),
                   outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_EQ(outcome.result, Result::Timeout);
@@ -252,68 +238,52 @@ TEST(P2PHost, PunchTowardNothingTimesOut) {
   host.Stop();
 }
 
+// A multi-homed peer offers every address it has, and most of them are dead
+// to anyone not on that network. Every candidate is raced at once, so a punch
+// must not get slower the more of them it is given.
+TEST(P2PHost, ManyDeadCandidatesDoNotSlowThePunch) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::HostConfig config;
+  config.bind_address = "127.0.0.1";
+  p2p::Host a{config};
+  p2p::Host b{config};
+  ASSERT_EQ(a.Start(), Result::Success);
+  ASSERT_EQ(b.Start(), Result::Success);
+
+  std::vector<std::shared_ptr<InetAddress>> to_b;
+  std::vector<std::shared_ptr<InetAddress>> to_a;
+  for (int i = 0; i < 7; i++) {
+    // TEST-NET-1 space: routable nowhere, so the candidate just goes dark
+    std::shared_ptr<InetAddress> dead =
+        InetAddress::from("203.0.113." + std::to_string(1 + i), 9);
+    to_b.push_back(dead);
+    to_a.push_back(dead);
+  }
+  to_b.push_back(HostAddr(b));
+  to_a.push_back(HostAddr(a));
+
+  PunchOutcome at_a;
+  PunchOutcome at_b;
+  const auto started = std::chrono::steady_clock::now();
+  a.Punch(Offer(to_b, 9, true), at_a.Callback());
+  b.Punch(Offer(to_a, 9, false), at_b.Callback());
+  ASSERT_TRUE(WaitUntil([&]() { return at_a.done.load() && at_b.done.load(); },
+                        12000));
+  EXPECT_EQ(at_a.result, Result::Success);
+  EXPECT_EQ(at_b.result, Result::Success);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(5))
+      << "dead candidates must cost nothing but a datagram each";
+  a.Stop();
+  b.Stop();
+}
+
 // --- The mesh through the rendezvous ------------------------------------------
 
-namespace {
+using znet::test::HostLocatorProbe;
 
-struct MeshProbe {
-  p2p::MeshLocator locator;
-  std::mutex mutex;
-  std::string name;
-  std::vector<std::shared_ptr<PeerSession>> sessions;
-  std::atomic<int> connected{0};
-  std::atomic<bool> ready{false};
-
-  explicit MeshProbe(PortNumber relay_port)
-      : locator(p2p::MeshLocator::Config{"127.0.0.1", relay_port,
-                                         SessionOptions{}, "0.0.0.0", 0}) {
-    locator.SetEventCallback([this](Event& event) {
-      EventDispatcher dispatcher{event};
-      dispatcher.Dispatch<p2p::PeerLocatorReadyEvent>(
-          [this](p2p::PeerLocatorReadyEvent& ev) {
-            {
-              std::lock_guard<std::mutex> lock(mutex);
-              name = ev.peer_name();
-            }
-            ready = true;
-            return false;
-          });
-      dispatcher.Dispatch<p2p::PeerConnectedEvent>(
-          [this](p2p::PeerConnectedEvent& ev) {
-            {
-              std::lock_guard<std::mutex> lock(mutex);
-              sessions.push_back(ev.session());
-            }
-            connected++;
-            return false;
-          });
-    });
-  }
-
-  std::string Name() {
-    std::lock_guard<std::mutex> lock(mutex);
-    return name;
-  }
-
-  bool AllSessionsReady(int expected) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (static_cast<int>(sessions.size()) != expected) {
-      return false;
-    }
-    for (const auto& session : sessions) {
-      if (!session->IsReady()) {
-        return false;
-      }
-    }
-    return true;
-  }
-};
-
-}  // namespace
-
-TEST(MeshLocatorEndToEnd, ThreePlayersFormAMesh) {
+TEST(PeerLocatorEndToEnd, ThreePlayersFormAMesh) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
+  p2p::RendezvousServerConfig config;
   config.bind_address = "127.0.0.1";
   config.bind_port = 0;
   config.punch_connection_type = ConnectionType::ZDT;
@@ -321,9 +291,9 @@ TEST(MeshLocatorEndToEnd, ThreePlayersFormAMesh) {
   ASSERT_EQ(relay.Start(), Result::Success);
   const PortNumber port = relay.bind_address()->port();
 
-  MeshProbe a{port};
-  MeshProbe b{port};
-  MeshProbe c{port};
+  HostLocatorProbe a{port};
+  HostLocatorProbe b{port};
+  HostLocatorProbe c{port};
   ASSERT_EQ(a.locator.Connect(), Result::Success);
   ASSERT_EQ(b.locator.Connect(), Result::Success);
   ASSERT_EQ(c.locator.Connect(), Result::Success);
@@ -331,7 +301,7 @@ TEST(MeshLocatorEndToEnd, ThreePlayersFormAMesh) {
       [&]() { return a.ready.load() && b.ready.load() && c.ready.load(); },
       5000));
 
-  // everyone asks everyone; the relay pairs the mutual asks into punches
+  // everyone asks everyone; the rendezvous pairs the mutual asks into punches
   ASSERT_EQ(a.locator.AskPeer(b.Name()), Result::Success);
   ASSERT_EQ(a.locator.AskPeer(c.Name()), Result::Success);
   ASSERT_EQ(b.locator.AskPeer(a.Name()), Result::Success);

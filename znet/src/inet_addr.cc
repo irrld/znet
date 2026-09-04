@@ -9,6 +9,8 @@
 //
 
 #include "znet/inet_addr.h"
+
+#include "znet/detail/socket_ops.h"
 #include "znet/detail/sys_net.h"
 #include "znet/logger.h"
 #include "znet/init.h"
@@ -343,6 +345,19 @@ std::string ResolveHostnameToIP(const std::string& hostname) {
     return hostname;
   }
   return ip_str;
+}
+
+bool InetAddress::operator==(const InetAddress& other) const {
+  if (ipv_ != other.ipv_ || is_valid() != other.is_valid()) {
+    return false;
+  }
+  if (!is_valid()) {
+    return true;
+  }
+  if (ipv_ == InetProtocolVersion::Unix) {
+    return readable_ == other.readable_;
+  }
+  return SameEndpoint(handle_ptr(), other.handle_ptr());
 }
 
 std::unique_ptr<InetAddress> InetAddress::from(const std::string& host, PortNumber port) {

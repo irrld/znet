@@ -9,35 +9,40 @@
 //
 
 //
-// PeerLocator tests: lifecycle (the destructor has to wake the worker out of
-// its condition wait and join it; a regression here is a hang, so lifecycle
-// cases run on a helper thread and fail on a deadline instead of deadlocking
-// the suite), and the whole rendezvous-and-punch flow end to end against an
-// in-process RendezvousServer on loopback.
+// Locator tests: the tcp::PeerLocator lifecycle (the destructor has to wake
+// the worker out of its condition wait and join it; a regression here is a
+// hang, so lifecycle cases run on a helper thread and fail on a deadline
+// instead of deadlocking the suite), the whole rendezvous-and-punch flow end
+// to end against an in-process RendezvousServer on loopback with both
+// locators, the exchange itself spoken by hand, and the wire format.
 //
 
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
-
-#include "znet/client.h"
-#include "znet/detail/socket_ops.h"
-#include "znet/client_events.h"
-#include "znet/init.h"
-#include "znet/p2p/dialer.h"
-#include "znet/p2p/locator.h"
-#include "znet/p2p/rendezvous_server.h"
-#include "znet/packet_handler.h"
-
 #include <vector>
 
+#include "p2p_probes.h"
+#include "znet/client.h"
+#include "znet/client_events.h"
+#include "znet/detail/socket_ops.h"
+#include "znet/init.h"
+#include "znet/p2p/locator.h"
+#include "znet/p2p/rendezvous_server.h"
+#include "znet/p2p/tcp/locator.h"
+#include "znet/p2p/tcp/punch.h"
+#include "znet/packet_handler.h"
+
 using namespace znet;
+using znet::test::HostLocatorProbe;
+using znet::test::TCPLocatorProbe;
 
 namespace {
 
@@ -58,53 +63,6 @@ bool RunWithDeadline(std::function<void()> fn, std::chrono::seconds deadline) {
   return false;
 }
 
-}  // namespace
-
-TEST(PeerLocator, DestructorJoinsWorkerWithoutConnect) {
-  ASSERT_EQ(znet::Init(), znet::Result::Success);
-  bool finished = RunWithDeadline(
-      []() {
-        znet::p2p::PeerLocatorConfig config;
-        config.server_address = "127.0.0.1";
-        config.server_port = 1;
-        znet::p2p::PeerLocator locator{config};
-      },
-      std::chrono::seconds(10));
-  EXPECT_TRUE(finished) << "destructor hung with no worker started";
-}
-
-TEST(PeerLocator, DestructorJoinsWorkerAfterFailedConnect) {
-  ASSERT_EQ(znet::Init(), znet::Result::Success);
-  bool finished = RunWithDeadline(
-      []() {
-        znet::p2p::PeerLocatorConfig config;
-        // Nothing listens on port 1; loopback refuses immediately.
-        config.server_address = "127.0.0.1";
-        config.server_port = 1;
-        znet::p2p::PeerLocator locator{config};
-        znet::Result result = locator.Connect();
-        EXPECT_NE(result, znet::Result::Success);
-      },
-      std::chrono::seconds(10));
-  EXPECT_TRUE(finished) << "destructor hung joining the worker thread";
-}
-
-TEST(PeerLocator, ConnectCanBeTriedAgainAfterAFailure) {
-  ASSERT_EQ(Init(), Result::Success);
-  p2p::PeerLocatorConfig config;
-  config.server_address = "127.0.0.1";
-  config.server_port = 1;
-  p2p::PeerLocator locator{config};
-  EXPECT_NE(locator.Connect(), Result::Success);
-  // a failed attempt used to leave is_running_ set and a worker parked, which
-  // turned every later Connect() into AlreadyConnected
-  EXPECT_NE(locator.Connect(), Result::AlreadyConnected);
-}
-
-// --- End to end over an in-process rendezvous ---------------------------------
-
-namespace {
-
 bool WaitFor(const std::atomic<bool>& flag, int ms) {
   auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
@@ -114,258 +72,395 @@ bool WaitFor(const std::atomic<bool>& flag, int ms) {
   return flag.load();
 }
 
-// one locator plus everything its events reported, collected thread-safely:
-// ready/connected/failed fire on the relay-client thread or the worker
-struct LocatorProbe {
-  p2p::PeerLocator locator;
-  std::mutex mutex;
-  std::string name;
-  std::shared_ptr<PeerSession> session;
-  p2p::PeerLocatorPhase failed_phase{};
-  Result failed_reason{};
-  std::string failed_target;
-  std::atomic<bool> ready{false};
-  // readiness sampled inside PeerConnectedEvent, which is where a caller would
-  // install its codec and handler
-  std::atomic<bool> ready_at_event{false};
-  std::atomic<bool> connected{false};
-  std::atomic<bool> failed{false};
-  std::atomic<bool> closed{false};
-
-  explicit LocatorProbe(PortNumber relay_port)
-      : locator(p2p::PeerLocatorConfig{"127.0.0.1", relay_port}) {
-    locator.SetEventCallback([this](Event& event) {
-      EventDispatcher dispatcher{event};
-      dispatcher.Dispatch<p2p::PeerLocatorReadyEvent>(
-          [this](p2p::PeerLocatorReadyEvent& ev) {
-            {
-              std::lock_guard<std::mutex> lock(mutex);
-              name = ev.peer_name();
-            }
-            ready = true;
-            return false;
-          });
-      dispatcher.Dispatch<p2p::PeerConnectedEvent>(
-          [this](p2p::PeerConnectedEvent& ev) {
-            {
-              std::lock_guard<std::mutex> lock(mutex);
-              session = ev.session();
-            }
-            ready_at_event = ev.session() && ev.session()->IsReady();
-            connected = true;
-            return false;
-          });
-      dispatcher.Dispatch<p2p::PeerLocatorFailedEvent>(
-          [this](p2p::PeerLocatorFailedEvent& ev) {
-            {
-              std::lock_guard<std::mutex> lock(mutex);
-              failed_phase = ev.phase();
-              failed_reason = ev.reason();
-              failed_target = ev.target_peer();
-            }
-            failed = true;
-            return false;
-          });
-      dispatcher.Dispatch<p2p::PeerLocatorCloseEvent>(
-          [this](p2p::PeerLocatorCloseEvent&) {
-            closed = true;
-            return false;
-          });
-    });
-  }
-
-  std::string Name() {
-    std::lock_guard<std::mutex> lock(mutex);
-    return name;
-  }
-
-  std::shared_ptr<PeerSession> Session() {
-    std::lock_guard<std::mutex> lock(mutex);
-    return session;
-  }
-};
-
-// waits until the locator reports either outcome; true means connected
-bool WaitForPunchOutcome(LocatorProbe& probe, int ms) {
+template <typename Pred>
+bool WaitUntil(Pred pred, int ms) {
   auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-  while (!probe.connected.load() && !probe.failed.load() &&
-         std::chrono::steady_clock::now() < deadline) {
+  while (!pred() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  return probe.connected.load();
+  return pred();
 }
 
-void RunPunchEndToEnd(ConnectionType punch_type) {
-  ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
+p2p::RendezvousServerConfig LoopbackRendezvous(ConnectionType punch_type) {
+  p2p::RendezvousServerConfig config;
   config.bind_address = "127.0.0.1";
   config.bind_port = 0;
   config.punch_connection_type = punch_type;
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
-  const PortNumber port = relay.bind_address()->port();
-  ASSERT_NE(port, 0);
+  return config;
+}
 
-  // a TCP punch must rebind the relay connection's exact port, and on a busy
-  // machine (CI runners especially) an unrelated connection's TIME_WAIT can
-  // hold that port for its full 60s. A clean failure is retryable: fresh
-  // relay connections land on fresh ports, which is what an application
-  // would do too. A hang, or failing every attempt, is still a bug.
-  constexpr int kAttempts = 3;
-  for (int attempt = 0; attempt < kAttempts; attempt++) {
-    LocatorProbe a{port};
-    LocatorProbe b{port};
-    ASSERT_EQ(a.locator.Connect(), Result::Success);
-    ASSERT_EQ(b.locator.Connect(), Result::Success);
-    ASSERT_TRUE(WaitFor(a.ready, 5000)) << "a never got a peer name";
-    ASSERT_TRUE(WaitFor(b.ready, 5000)) << "b never got a peer name";
+// a relay on loopback too, advertised as "the rendezvous host" so the
+// locators exercise the substitution
+void EnableLoopbackRelay(p2p::RendezvousServerConfig& config) {
+  config.relay_enabled = true;
+  config.relay.bind_address = "127.0.0.1";
+  config.relay.port = 0;
+}
 
-    ASSERT_EQ(a.locator.AskPeer(b.Name()), Result::Success);
-    ASSERT_EQ(b.locator.AskPeer(a.Name()), Result::Success);
+// waits until the probe reports either outcome; true means connected
+template <typename Probe>
+bool WaitForPunchOutcome(Probe& probe, int ms) {
+  return WaitUntil([&]() { return probe.connected.load() > 0 || probe.failed.load(); }, ms) &&
+         probe.connected.load() > 0;
+}
 
-    const bool a_ok = WaitForPunchOutcome(a, 15000);
-    const bool b_ok = WaitForPunchOutcome(b, 15000);
-    if (!a_ok || !b_ok) {
-      ASSERT_TRUE(a.connected.load() || a.failed.load())
-          << "a's punch neither completed nor failed";
-      ASSERT_TRUE(b.connected.load() || b.failed.load())
-          << "b's punch neither completed nor failed";
-      continue;
-    }
-
-    // the punched sessions drive themselves; the post-punch handshake has to
-    // settle on both ends
-    auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while ((!a.Session()->IsReady() || !b.Session()->IsReady()) &&
-           std::chrono::steady_clock::now() < deadline) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    EXPECT_TRUE(a.Session()->IsReady());
-    EXPECT_TRUE(b.Session()->IsReady());
-    relay.Stop();
-    return;
-  }
-  relay.Stop();
-  FAIL() << "the punch failed on every attempt";
+// two probes on one rendezvous: connect, wait for the names, ask for each
+// other, and wait for both punches to resolve. True when both connected.
+template <typename Probe>
+bool PairUp(Probe& a, Probe& b) {
+  EXPECT_EQ(a.locator.Connect(), Result::Success);
+  EXPECT_EQ(b.locator.Connect(), Result::Success);
+  EXPECT_TRUE(WaitFor(a.ready, 5000)) << "a never got a peer name";
+  EXPECT_TRUE(WaitFor(b.ready, 5000)) << "b never got a peer name";
+  EXPECT_EQ(a.locator.AskPeer(b.Name()), Result::Success);
+  EXPECT_EQ(b.locator.AskPeer(a.Name()), Result::Success);
+  const bool a_ok = WaitForPunchOutcome(a, 15000);
+  const bool b_ok = WaitForPunchOutcome(b, 15000);
+  EXPECT_TRUE(a.connected.load() || a.failed.load())
+      << "a's punch neither completed nor failed";
+  EXPECT_TRUE(b.connected.load() || b.failed.load())
+      << "b's punch neither completed nor failed";
+  return a_ok && b_ok;
 }
 
 }  // namespace
 
-TEST(PeerLocatorEndToEnd, PunchesOverTCP) {
-  RunPunchEndToEnd(ConnectionType::TCP);
+// --- tcp::PeerLocator lifecycle ---------------------------------------------
+
+TEST(TCPPeerLocator, DestructorJoinsWorkerWithoutConnect) {
+  ASSERT_EQ(znet::Init(), znet::Result::Success);
+  bool finished = RunWithDeadline(
+      []() {
+        p2p::tcp::PeerLocatorConfig config;
+        config.server_address = "127.0.0.1";
+        config.server_port = 1;
+        p2p::tcp::PeerLocator locator{config};
+      },
+      std::chrono::seconds(10));
+  EXPECT_TRUE(finished) << "destructor hung with no worker started";
+}
+
+TEST(TCPPeerLocator, DestructorJoinsWorkerAfterFailedConnect) {
+  ASSERT_EQ(znet::Init(), znet::Result::Success);
+  bool finished = RunWithDeadline(
+      []() {
+        p2p::tcp::PeerLocatorConfig config;
+        // Nothing listens on port 1; loopback refuses immediately.
+        config.server_address = "127.0.0.1";
+        config.server_port = 1;
+        p2p::tcp::PeerLocator locator{config};
+        znet::Result result = locator.Connect();
+        EXPECT_NE(result, znet::Result::Success);
+      },
+      std::chrono::seconds(10));
+  EXPECT_TRUE(finished) << "destructor hung joining the worker thread";
+}
+
+TEST(TCPPeerLocator, ConnectCanBeTriedAgainAfterAFailure) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::tcp::PeerLocatorConfig config;
+  config.server_address = "127.0.0.1";
+  config.server_port = 1;
+  p2p::tcp::PeerLocator locator{config};
+  EXPECT_NE(locator.Connect(), Result::Success);
+  // a failed attempt used to leave is_running_ set and a worker parked, which
+  // turned every later Connect() into AlreadyConnected
+  EXPECT_NE(locator.Connect(), Result::AlreadyConnected);
+}
+
+// --- End to end over an in-process rendezvous ---------------------------------
+
+// A TCP punch must rebind the link's exact port, and on a busy machine (CI
+// runners especially) an unrelated connection's TIME_WAIT can hold that port
+// for its full 60s. A clean failure is retryable: fresh links land on fresh
+// ports, which is what an application would do too. A hang, or failing every
+// attempt, is still a bug.
+void RunTCPPunchEndToEnd(
+    std::function<void(TCPLocatorProbe&, TCPLocatorProbe&)> check) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::TCP)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  const PortNumber port = rendezvous.bind_address()->port();
+  ASSERT_NE(port, 0);
+  constexpr int kAttempts = 3;
+  for (int attempt = 0; attempt < kAttempts; attempt++) {
+    TCPLocatorProbe a{port};
+    TCPLocatorProbe b{port};
+    if (!PairUp(a, b)) {
+      continue;
+    }
+    check(a, b);
+    rendezvous.Stop();
+    return;
+  }
+  rendezvous.Stop();
+  FAIL() << "the punch failed on every attempt";
+}
+
+TEST(TCPPeerLocatorEndToEnd, PunchesOverTCP) {
+  RunTCPPunchEndToEnd([](TCPLocatorProbe& a, TCPLocatorProbe& b) {
+    // the punched sessions drive themselves; the post-punch handshake has to
+    // settle on both ends
+    EXPECT_TRUE(WaitUntil(
+        [&]() { return a.Session()->IsReady() && b.Session()->IsReady(); },
+        10000));
+  });
+}
+
+// A connected event is where a caller installs its codec and handler, and the
+// encryption layer owns both until the handshake finishes. So the session the
+// event carries has to be ready, or anything installed is discarded and the
+// connection stalls.
+TEST(TCPPeerLocatorEndToEnd, ConnectedEventIsReady) {
+  RunTCPPunchEndToEnd([](TCPLocatorProbe& a, TCPLocatorProbe& b) {
+    EXPECT_TRUE(a.ready_at_event.load())
+        << "a's connected event handed over a session still handshaking";
+    EXPECT_TRUE(b.ready_at_event.load())
+        << "b's connected event handed over a session still handshaking";
+  });
+}
+
+// the one-shot locator is TCP only; a rendezvous brokering ZDT says so in
+// its welcome and has to be met with a clean failure right there
+TEST(TCPPeerLocatorEndToEnd, AZDTRendezvousFailsAtTheWelcome) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::ZDT)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  TCPLocatorProbe a{rendezvous.bind_address()->port()};
+  ASSERT_EQ(a.locator.Connect(), Result::Success);
+  ASSERT_TRUE(WaitFor(a.failed, 5000));
+  {
+    std::lock_guard<std::mutex> lock(a.mutex);
+    EXPECT_EQ(a.failed_phase, p2p::PeerLocatorPhase::Link);
+    EXPECT_EQ(a.failed_reason, Result::InvalidBackend);
+  }
+  EXPECT_FALSE(a.ready.load()) << "nothing to gather for";
+  EXPECT_TRUE(WaitFor(a.closed, 5000));
+  rendezvous.Stop();
+}
+
+TEST(TCPPeerLocatorEndToEnd, AskingForAnUnknownPeerFailsTheExchange) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::TCP)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  const PortNumber port = rendezvous.bind_address()->port();
+
+  TCPLocatorProbe a{port};
+  ASSERT_EQ(a.locator.Connect(), Result::Success);
+  ASSERT_TRUE(WaitFor(a.ready, 5000));
+  ASSERT_EQ(a.locator.AskPeer("no-such-peer"), Result::Success);
+  ASSERT_TRUE(WaitFor(a.failed, 5000))
+      << "the rendezvous must answer an unknown name, not stay silent";
+  {
+    std::lock_guard<std::mutex> lock(a.mutex);
+    EXPECT_EQ(a.failed_phase, p2p::PeerLocatorPhase::Exchange);
+    EXPECT_EQ(a.failed_reason, Result::PeerNotFound);
+    EXPECT_EQ(a.failed_target, "no-such-peer");
+  }
+  EXPECT_EQ(a.connected.load(), 0);
+  // the link survives the miss, so asking again stays possible
+  a.locator.Disconnect();
+  rendezvous.Stop();
+}
+
+// the same flow over ZDT, through the Host-based locator
+void RunPunchEndToEnd(
+    p2p::RendezvousServerConfig config,
+    std::function<void(p2p::RendezvousServer&, HostLocatorProbe&,
+                       HostLocatorProbe&)> check) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{config};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  const PortNumber port = rendezvous.bind_address()->port();
+
+  HostLocatorProbe a{port};
+  HostLocatorProbe b{port};
+  ASSERT_TRUE(PairUp(a, b)) << "the punch failed";
+  check(rendezvous, a, b);
+  a.locator.Disconnect();
+  b.locator.Disconnect();
+  rendezvous.Stop();
+}
+
+TEST(PeerLocatorEndToEnd, PunchesOverZDT) {
+  RunPunchEndToEnd(LoopbackRendezvous(ConnectionType::ZDT),
+                   [](p2p::RendezvousServer&, HostLocatorProbe& a,
+                      HostLocatorProbe& b) {
+                     EXPECT_TRUE(WaitUntil(
+                         [&]() {
+                           return a.Session()->IsReady() &&
+                                  b.Session()->IsReady();
+                         },
+                         10000));
+                   });
+}
+
+TEST(PeerLocatorEndToEnd, ConnectedEventIsReady) {
+  RunPunchEndToEnd(LoopbackRendezvous(ConnectionType::ZDT),
+                   [](p2p::RendezvousServer&, HostLocatorProbe& a,
+                      HostLocatorProbe& b) {
+                     EXPECT_TRUE(a.ready_at_event.load());
+                     EXPECT_TRUE(b.ready_at_event.load());
+                   });
 }
 
 #ifndef ZNET_TARGET_WIN
 // std::clock() is process CPU time on POSIX, which is exactly the claim under
 // test; on Windows it is wall time and the test would be meaningless.
 TEST(PeerLocatorEndToEnd, IdlePunchedSessionsDoNotSpin) {
-  ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
-  config.bind_address = "127.0.0.1";
-  config.bind_port = 0;
-  config.punch_connection_type = ConnectionType::ZDT;
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
-  const PortNumber port = relay.bind_address()->port();
-
-  LocatorProbe a{port};
-  LocatorProbe b{port};
-  ASSERT_EQ(a.locator.Connect(), Result::Success);
-  ASSERT_EQ(b.locator.Connect(), Result::Success);
-  ASSERT_TRUE(WaitFor(a.ready, 5000));
-  ASSERT_TRUE(WaitFor(b.ready, 5000));
-  ASSERT_EQ(a.locator.AskPeer(b.Name()), Result::Success);
-  ASSERT_EQ(b.locator.AskPeer(a.Name()), Result::Success);
-  ASSERT_TRUE(WaitFor(a.connected, 15000));
-  ASSERT_TRUE(WaitFor(b.connected, 15000));
-
-  // two idle self-managed sessions for one wall second. Spinning loops would
-  // cost ~two CPU seconds; paced ones cost almost nothing.
-  const std::clock_t cpu_before = std::clock();
-  std::this_thread::sleep_for(std::chrono::seconds(1));
-  const double cpu_seconds =
-      static_cast<double>(std::clock() - cpu_before) / CLOCKS_PER_SEC;
-  EXPECT_LT(cpu_seconds, 0.5)
-      << "idle punched sessions must doze, not spin a core";
-  relay.Stop();
+  RunPunchEndToEnd(
+      LoopbackRendezvous(ConnectionType::ZDT),
+      [](p2p::RendezvousServer&, HostLocatorProbe&, HostLocatorProbe&) {
+        // two idle hosts, one session each, for one wall second. Spinning
+        // ticks would cost ~two CPU seconds; dozing ones cost almost nothing.
+        const std::clock_t cpu_before = std::clock();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const double cpu_seconds =
+            static_cast<double>(std::clock() - cpu_before) / CLOCKS_PER_SEC;
+        EXPECT_LT(cpu_seconds, 0.5)
+            << "idle punched sessions must doze, not spin a core";
+      });
 }
 #endif  // ZNET_TARGET_WIN
 
-TEST(PeerLocatorEndToEnd, PunchesOverZDT) {
-  RunPunchEndToEnd(ConnectionType::ZDT);
+TEST(PeerLocatorEndToEnd, ATCPRendezvousFailsAtTheWelcome) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::TCP)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  HostLocatorProbe a{rendezvous.bind_address()->port()};
+  ASSERT_EQ(a.locator.Connect(), Result::Success);
+  ASSERT_TRUE(WaitFor(a.failed, 5000));
+  {
+    std::lock_guard<std::mutex> lock(a.mutex);
+    EXPECT_EQ(a.failed_phase, p2p::PeerLocatorPhase::Link);
+    EXPECT_EQ(a.failed_reason, Result::InvalidBackend);
+  }
+  EXPECT_FALSE(a.ready.load()) << "nothing to gather for";
+  EXPECT_TRUE(WaitFor(a.closed, 5000));
+  a.locator.Disconnect();
+  rendezvous.Stop();
 }
 
-namespace {
-
-// A connected event is where a caller installs its codec and handler, and the
-// encryption layer owns both until the handshake finishes. So the session the
-// event carries has to be ready, or anything installed is discarded and the
-// connection stalls. Retries mirror RunPunchEndToEnd: a punch that never lands
-// is a flaky port, not a broken contract.
-void ExpectConnectedEventCarriesAReadySession(ConnectionType punch_type) {
+// a rendezvous from another protocol generation is refused at the welcome
+// rather than waited on forever
+TEST(PeerLocatorEndToEnd, AForeignProtocolVersionFailsAtTheWelcome) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
+  ServerConfig config{};
   config.bind_address = "127.0.0.1";
   config.bind_port = 0;
-  config.punch_connection_type = punch_type;
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
-  const PortNumber port = relay.bind_address()->port();
+  config.connection_type = ConnectionType::TCP;
+  Server impostor{config};
+  impostor.SetEventCallback([](Event& event) {
+    EventDispatcher dispatcher{event};
+    dispatcher.Dispatch<IncomingClientConnectedEvent>(
+        [](IncomingClientConnectedEvent& ev) {
+          ev.session()->SetCodec(p2p::BuildRendezvousCodec());
+          auto welcome = std::make_shared<p2p::WelcomePacket>();
+          welcome->protocol_version_ = p2p::kRendezvousProtocolVersion + 1;
+          welcome->peer_name_ = "stranger";
+          welcome->endpoint_ = ev.session()->remote_address();
+          ev.session()->SendPacket(welcome);
+          return false;
+        });
+  });
+  ASSERT_EQ(impostor.Bind(), Result::Success);
+  ASSERT_EQ(impostor.Listen(), Result::Success);
 
-  for (int attempt = 0; attempt < 3; attempt++) {
-    LocatorProbe a{port};
-    LocatorProbe b{port};
-    ASSERT_EQ(a.locator.Connect(), Result::Success);
-    ASSERT_EQ(b.locator.Connect(), Result::Success);
-    ASSERT_TRUE(WaitFor(a.ready, 5000));
-    ASSERT_TRUE(WaitFor(b.ready, 5000));
-    ASSERT_EQ(a.locator.AskPeer(b.Name()), Result::Success);
-    ASSERT_EQ(b.locator.AskPeer(a.Name()), Result::Success);
-
-    if (!WaitForPunchOutcome(a, 15000) || !WaitForPunchOutcome(b, 15000)) {
-      continue;
-    }
-    EXPECT_TRUE(a.ready_at_event.load())
-        << "a's connected event handed over a session still handshaking";
-    EXPECT_TRUE(b.ready_at_event.load())
-        << "b's connected event handed over a session still handshaking";
-    relay.Stop();
-    return;
+  HostLocatorProbe a{impostor.bind_address()->port()};
+  ASSERT_EQ(a.locator.Connect(), Result::Success);
+  ASSERT_TRUE(WaitFor(a.failed, 5000));
+  {
+    std::lock_guard<std::mutex> lock(a.mutex);
+    EXPECT_EQ(a.failed_phase, p2p::PeerLocatorPhase::Link);
+    EXPECT_EQ(a.failed_reason, Result::IncompatibleVersion);
   }
-  relay.Stop();
-  FAIL() << "the punch failed on every attempt";
+  a.locator.Disconnect();
+  impostor.Stop();
 }
 
-}  // namespace
-
-TEST(PeerLocatorEndToEnd, ConnectedEventIsReadyOverZDT) {
-  ExpectConnectedEventCarriesAReadySession(ConnectionType::ZDT);
+TEST(PeerLocatorEndToEnd, AskingForAnUnknownPeerFailsTheExchange) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::ZDT)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  HostLocatorProbe a{rendezvous.bind_address()->port()};
+  ASSERT_EQ(a.locator.Connect(), Result::Success);
+  ASSERT_TRUE(WaitFor(a.ready, 5000));
+  ASSERT_EQ(a.locator.AskPeer("no-such-peer"), Result::Success);
+  ASSERT_TRUE(WaitFor(a.failed, 5000));
+  {
+    std::lock_guard<std::mutex> lock(a.mutex);
+    EXPECT_EQ(a.failed_phase, p2p::PeerLocatorPhase::Exchange);
+    EXPECT_EQ(a.failed_reason, Result::PeerNotFound);
+  }
+  a.locator.Disconnect();
+  rendezvous.Stop();
 }
 
-TEST(PeerLocatorEndToEnd, ConnectedEventIsReadyOverTCP) {
-  ExpectConnectedEventCarriesAReadySession(ConnectionType::TCP);
+TEST(PeerLocatorEndToEnd, AskingBeforeTheLinkIsRefused) {
+  ASSERT_EQ(Init(), Result::Success);
+  HostLocatorProbe a{1};
+  EXPECT_EQ(a.locator.AskPeer("anyone"), Result::NotConnected);
 }
 
-// --- Relay protections --------------------------------------------------------
+// --- With a relay ---------------------------------------------------------------
+
+TEST(PeerLocatorWithRelay, ReadyReportsTheReflexiveEndpoint) {
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
+  EnableLoopbackRelay(config);
+  RunPunchEndToEnd(config, [](p2p::RendezvousServer&, HostLocatorProbe& a,
+                              HostLocatorProbe& b) {
+    // the reflector on the relay's control port told each socket its mapping,
+    // which on loopback is the socket itself
+    ASSERT_TRUE(a.Endpoint());
+    EXPECT_EQ(a.Endpoint()->readable(),
+              "127.0.0.1:" + std::to_string(a.locator.host().punch_port()));
+    EXPECT_EQ(b.Endpoint()->readable(),
+              "127.0.0.1:" + std::to_string(b.locator.host().punch_port()));
+  });
+}
+
+TEST(PeerLocatorWithRelay, PunchesDirectAndTheRelayIsFreed) {
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
+  EnableLoopbackRelay(config);
+  config.relay.idle_timeout = std::chrono::milliseconds(500);
+  RunPunchEndToEnd(config, [](p2p::RendezvousServer& rendezvous,
+                              HostLocatorProbe& a, HostLocatorProbe& b) {
+    // both were offered the relay and bound it, the direct path won, and
+    // the unused allocation goes back once it idles
+    EXPECT_NE(a.Session()->remote_address()->readable(),
+              b.Session()->remote_address()->readable());
+    ASSERT_NE(rendezvous.relay(), nullptr);
+    EXPECT_TRUE(WaitUntil(
+        [&]() { return rendezvous.relay()->metrics().binds_accepted == 2u; },
+        3000));
+    EXPECT_TRUE(WaitUntil(
+        [&]() { return rendezvous.relay()->allocation_count() == 0; }, 5000))
+        << "a relay nobody uses must be freed";
+  });
+}
+
+// --- The exchange, spoken by hand ----------------------------------------------
 
 namespace {
 
-// speaks the rendezvous protocol by hand, so it can misbehave in ways
-// PeerLocator never would
-struct RawRelayClient {
+// speaks the rendezvous protocol by hand, so it can misbehave in ways a
+// locator never would
+struct RawClient {
   Client client;
   std::mutex mutex;
-  std::vector<std::string> names;
   std::shared_ptr<PeerSession> session;
   std::atomic<bool> connected{false};
-  std::atomic<int> name_count{0};
-  std::vector<std::shared_ptr<InetAddress>> punch_privates;
-  std::shared_ptr<InetAddress> punch_public;
-  std::atomic<int> punch_count{0};
+  std::string name;
+  std::shared_ptr<InetAddress> observed;
+  std::vector<std::shared_ptr<InetAddress>> reflectors;
+  ConnectionType punch_type = ConnectionType::ZDT;
+  std::atomic<int> welcome_count{0};
+  std::vector<p2p::Candidate> offered;
+  uint64_t punch_id = 0;
+  std::atomic<int> offer_count{0};
 
-  explicit RawRelayClient(PortNumber port, int timeout_seconds = 5)
+  explicit RawClient(PortNumber port, int timeout_seconds = 5)
       : client(ClientConfig{"127.0.0.1", port,
                             std::chrono::seconds(timeout_seconds),
                             ConnectionType::TCP, {}}) {
@@ -374,22 +469,25 @@ struct RawRelayClient {
       dispatcher.Dispatch<ClientConnectedToServerEvent>(
           [this](ClientConnectedToServerEvent& ev) {
             auto handler = std::make_shared<CallbackPacketHandler>();
-            handler->AddRef<p2p::SetPeerNamePacket>(
-                [this](const p2p::SetPeerNamePacket& pk) {
+            handler->AddRef<p2p::WelcomePacket>(
+                [this](const p2p::WelcomePacket& pk) {
                   {
                     std::lock_guard<std::mutex> lock(mutex);
-                    names.push_back(pk.peer_name_);
+                    name = pk.peer_name_;
+                    observed = pk.endpoint_;
+                    reflectors = pk.reflectors_;
+                    punch_type = pk.connection_type_;
                   }
-                  name_count++;
+                  welcome_count++;
                 });
-            handler->AddRef<p2p::StartPunchRequestPacket>(
-                [this](const p2p::StartPunchRequestPacket& pk) {
+            handler->AddRef<p2p::PunchOfferPacket>(
+                [this](const p2p::PunchOfferPacket& pk) {
                   {
                     std::lock_guard<std::mutex> lock(mutex);
-                    punch_public = pk.target_endpoint_;
-                    punch_privates = pk.target_private_endpoints_;
+                    offered = pk.candidates_;
+                    punch_id = pk.punch_id_;
                   }
-                  punch_count++;
+                  offer_count++;
                 });
             auto s = ev.session();
             s->SetCodec(p2p::BuildRendezvousCodec());
@@ -404,203 +502,369 @@ struct RawRelayClient {
     });
   }
 
+  void Connect() {
+    ASSERT_EQ(client.Bind(), Result::Success);
+    ASSERT_EQ(client.Connect(), Result::Success);
+    ASSERT_TRUE(WaitFor(connected, 5000));
+    ASSERT_TRUE(WaitUntil([&]() { return welcome_count.load() >= 1; }, 5000));
+  }
+
   std::shared_ptr<PeerSession> Session() {
     std::lock_guard<std::mutex> lock(mutex);
     return session;
   }
+
+  std::string Name() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return name;
+  }
+
+  void Gather(PortNumber punch_port, std::vector<p2p::Candidate> candidates) {
+    auto pk = std::make_shared<p2p::GatheringPacket>();
+    pk->punch_port_ = punch_port;
+    pk->candidates_ = std::move(candidates);
+    Session()->SendPacket(pk);
+  }
+
+  void Ask(const std::string& target) {
+    auto ask = std::make_shared<p2p::ConnectPeerPacket>();
+    ask->target_peer_ = target;
+    Session()->SendPacket(ask);
+  }
+
+  std::vector<p2p::Candidate> Offered() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return offered;
+  }
 };
 
-template <typename Pred>
-bool WaitUntil(Pred pred, int ms) {
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-  while (!pred() && std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+p2p::Candidate Cand(p2p::CandidateType type, const std::string& host,
+                    PortNumber port, uint64_t token = 0) {
+  p2p::Candidate candidate;
+  candidate.type = type;
+  candidate.address = InetAddress::from(host, port);
+  candidate.relay_token = token;
+  return candidate;
+}
+
+std::vector<std::string> Readable(const std::vector<p2p::Candidate>& list) {
+  std::vector<std::string> out;
+  for (const auto& candidate : list) {
+    out.push_back(p2p::GetCandidateTypeString(candidate.type) + " " +
+                  candidate.address->readable());
   }
-  return pred();
+  return out;
+}
+
+// both ask for each other and both offers arrive
+void Exchange(RawClient& a, RawClient& b) {
+  a.Ask(b.Name());
+  b.Ask(a.Name());
+  ASSERT_TRUE(WaitUntil([&]() { return a.offer_count.load() >= 1; }, 5000));
+  ASSERT_TRUE(WaitUntil([&]() { return b.offer_count.load() >= 1; }, 5000));
 }
 
 }  // namespace
 
-TEST(RendezvousProtection, RepeatedIdentifyKeepsTheSameName) {
+TEST(RendezvousExchange, CandidatesReachTheMatchReflexiveFirst) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
-  config.bind_address = "127.0.0.1";
-  config.bind_port = 0;
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
-
-  RawRelayClient c{relay.bind_address()->port()};
-  ASSERT_EQ(c.client.Bind(), Result::Success);
-  ASSERT_EQ(c.client.Connect(), Result::Success);
-  ASSERT_TRUE(WaitFor(c.connected, 5000));
-
-  c.Session()->SendPacket(std::make_shared<p2p::IdentifyPacket>());
-  ASSERT_TRUE(WaitUntil([&]() { return c.name_count.load() >= 1; }, 5000));
-  c.Session()->SendPacket(std::make_shared<p2p::IdentifyPacket>());
-  ASSERT_TRUE(WaitUntil([&]() { return c.name_count.load() >= 2; }, 5000));
-  {
-    std::lock_guard<std::mutex> lock(c.mutex);
-    EXPECT_EQ(c.names[0], c.names[1])
-        << "a repeat identify must not mint (and leak) a fresh name";
-  }
-  c.client.Disconnect();
-  relay.Stop();
-}
-
-TEST(RendezvousPrivateEndpoints, EveryClaimedAddressReachesTheMatch) {
-  ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
-  config.bind_address = "127.0.0.1";
-  config.bind_port = 0;
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::ZDT)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  RawClient a{rendezvous.bind_address()->port()};
+  RawClient b{rendezvous.bind_address()->port()};
+  a.Connect();
+  b.Connect();
+  EXPECT_TRUE(a.reflectors.empty()) << "no relay, no reflector";
 
   // a multi-homed peer cannot know which of its networks the match shares,
-  // so all of them have to survive the relay
-  auto identify_with = [](const std::vector<std::string>& addresses) {
-    auto pk = std::make_shared<p2p::IdentifyPacket>();
-    pk->punch_port_ = 4444;
-    for (const auto& address : addresses) {
-      pk->local_endpoints_.push_back(InetAddress::from(address, 4444));
-    }
-    return pk;
-  };
-
-  RawRelayClient a{relay.bind_address()->port()};
-  RawRelayClient b{relay.bind_address()->port()};
-  ASSERT_EQ(a.client.Bind(), Result::Success);
-  ASSERT_EQ(a.client.Connect(), Result::Success);
-  ASSERT_EQ(b.client.Bind(), Result::Success);
-  ASSERT_EQ(b.client.Connect(), Result::Success);
-  ASSERT_TRUE(WaitFor(a.connected, 5000));
-  ASSERT_TRUE(WaitFor(b.connected, 5000));
-
-  a.Session()->SendPacket(identify_with({"10.0.0.1", "192.168.5.5"}));
-  b.Session()->SendPacket(identify_with({"10.0.0.2", "172.20.1.1"}));
-  ASSERT_TRUE(WaitUntil([&]() { return a.name_count.load() >= 1; }, 5000));
-  ASSERT_TRUE(WaitUntil([&]() { return b.name_count.load() >= 1; }, 5000));
-
-  std::string a_name;
-  std::string b_name;
-  {
-    std::lock_guard<std::mutex> lock(a.mutex);
-    a_name = a.names[0];
-  }
-  {
-    std::lock_guard<std::mutex> lock(b.mutex);
-    b_name = b.names[0];
-  }
-
-  auto ask = std::make_shared<p2p::ConnectPeerPacket>();
-  ask->target_peer_ = b_name;
-  a.Session()->SendPacket(ask);
-  ask = std::make_shared<p2p::ConnectPeerPacket>();
-  ask->target_peer_ = a_name;
-  b.Session()->SendPacket(ask);
-
-  ASSERT_TRUE(WaitUntil([&]() { return a.punch_count.load() >= 1; }, 5000));
-  ASSERT_TRUE(WaitUntil([&]() { return b.punch_count.load() >= 1; }, 5000));
-
-  auto readable = [](const std::vector<std::shared_ptr<InetAddress>>& list) {
-    std::vector<std::string> out;
-    for (const auto& address : list) {
-      out.push_back(address->readable());
-    }
-    return out;
-  };
-  std::vector<std::string> a_got;
-  std::vector<std::string> b_got;
-  {
-    std::lock_guard<std::mutex> lock(a.mutex);
-    a_got = readable(a.punch_privates);
-  }
-  {
-    std::lock_guard<std::mutex> lock(b.mutex);
-    b_got = readable(b.punch_privates);
-  }
-  EXPECT_EQ(a_got, (std::vector<std::string>{"10.0.0.2:4444", "172.20.1.1:4444"}))
-      << "the match must see every network the peer offered";
-  EXPECT_EQ(b_got, (std::vector<std::string>{"10.0.0.1:4444", "192.168.5.5:4444"}));
-
+  // so every host candidate has to survive, after the reflexive one and
+  // without any that merely repeats it
+  a.Gather(4444, {Cand(p2p::CandidateType::Host, "10.0.0.1", 4444),
+                  Cand(p2p::CandidateType::Reflexive, "198.51.100.7", 4444),
+                  Cand(p2p::CandidateType::Host, "192.168.5.5", 4444),
+                  Cand(p2p::CandidateType::Host, "198.51.100.7", 4444)});
+  b.Gather(5555, {Cand(p2p::CandidateType::Reflexive, "198.51.100.8", 5555),
+                  Cand(p2p::CandidateType::Host, "10.0.0.2", 5555)});
+  Exchange(a, b);
+  EXPECT_EQ(Readable(a.Offered()),
+            (std::vector<std::string>{"Reflexive 198.51.100.8:5555",
+                                      "Host 10.0.0.2:5555"}));
+  EXPECT_EQ(Readable(b.Offered()),
+            (std::vector<std::string>{"Reflexive 198.51.100.7:4444",
+                                      "Host 10.0.0.1:4444",
+                                      "Host 192.168.5.5:4444"}));
+  EXPECT_EQ(a.punch_id, b.punch_id);
   a.client.Disconnect();
   b.client.Disconnect();
-  relay.Stop();
+  rendezvous.Stop();
 }
 
-TEST(RendezvousPrivateEndpoints, IdentifyRoundTripsEveryEndpoint) {
-  auto packet = std::make_shared<p2p::IdentifyPacket>();
-  packet->punch_port_ = 7000;
-  packet->local_endpoints_.push_back(InetAddress::from("10.0.0.1", 7000));
-  packet->local_endpoints_.push_back(InetAddress::from("192.168.1.9", 7000));
-  packet->local_endpoints_.push_back(InetAddress::from("127.0.0.1", 7000));
+TEST(RendezvousExchange, SynthesizesAReflexiveFromTheObservedAddress) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::ZDT)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  RawClient a{rendezvous.bind_address()->port()};
+  RawClient b{rendezvous.bind_address()->port()};
+  a.Connect();
+  b.Connect();
+  // no reflector answered a, so the match gets the address the rendezvous
+  // saw a at, paired with a's punch port
+  a.Gather(4444, {Cand(p2p::CandidateType::Host, "10.0.0.1", 4444)});
+  b.Gather(5555, {});
+  Exchange(a, b);
+  EXPECT_EQ(Readable(b.Offered()),
+            (std::vector<std::string>{"Reflexive 127.0.0.1:4444",
+                                      "Host 10.0.0.1:4444"}));
+  EXPECT_EQ(Readable(a.Offered()),
+            (std::vector<std::string>{"Reflexive 127.0.0.1:5555"}));
+  a.client.Disconnect();
+  b.client.Disconnect();
+  rendezvous.Stop();
+}
 
-  p2p::IdentifySerializer serializer;
+TEST(RendezvousExchange, ARelayedClaimIsDropped) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::ZDT)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  RawClient a{rendezvous.bind_address()->port()};
+  RawClient b{rendezvous.bind_address()->port()};
+  a.Connect();
+  b.Connect();
+  // only the server hands out relays; a client claiming one is lying
+  a.Gather(4444, {Cand(p2p::CandidateType::Relayed, "203.0.113.9", 1, 42),
+                  Cand(p2p::CandidateType::Host, "10.0.0.1", 4444)});
+  b.Gather(5555, {});
+  Exchange(a, b);
+  EXPECT_EQ(Readable(b.Offered()),
+            (std::vector<std::string>{"Reflexive 127.0.0.1:4444",
+                                      "Host 10.0.0.1:4444"}));
+  a.client.Disconnect();
+  b.client.Disconnect();
+  rendezvous.Stop();
+}
+
+TEST(RendezvousExchange, TheLatestGatheringWins) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::ZDT)};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  RawClient a{rendezvous.bind_address()->port()};
+  RawClient b{rendezvous.bind_address()->port()};
+  a.Connect();
+  b.Connect();
+  a.Gather(4444, {Cand(p2p::CandidateType::Host, "10.0.0.1", 4444)});
+  a.Gather(4445, {Cand(p2p::CandidateType::Host, "10.0.0.9", 4445)});
+  b.Gather(5555, {});
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  Exchange(a, b);
+  EXPECT_EQ(Readable(b.Offered()),
+            (std::vector<std::string>{"Reflexive 127.0.0.1:4445",
+                                      "Host 10.0.0.9:4445"}));
+  a.client.Disconnect();
+  b.client.Disconnect();
+  rendezvous.Stop();
+}
+
+TEST(RendezvousExchange, ARelayIsOfferedToBothSides) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
+  EnableLoopbackRelay(config);
+  p2p::RendezvousServer rendezvous{config};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  ASSERT_NE(rendezvous.relay(), nullptr);
+  RawClient a{rendezvous.bind_address()->port()};
+  RawClient b{rendezvous.bind_address()->port()};
+  a.Connect();
+  b.Connect();
+  // the welcome names the reflector on the rendezvous host
+  ASSERT_EQ(a.reflectors.size(), 1u);
+  EXPECT_TRUE(p2p::IsUnspecifiedHost(*a.reflectors[0]));
+  EXPECT_EQ(a.reflectors[0]->port(),
+            rendezvous.relay()->address()->port());
+
+  a.Gather(4444, {});
+  b.Gather(5555, {});
+  Exchange(a, b);
+  const auto to_a = a.Offered();
+  const auto to_b = b.Offered();
+  ASSERT_EQ(to_a.size(), 2u);
+  ASSERT_EQ(to_b.size(), 2u);
+  // the same port and token for both, last in the list, on this host
+  EXPECT_EQ(to_a.back().type, p2p::CandidateType::Relayed);
+  EXPECT_EQ(to_b.back().type, p2p::CandidateType::Relayed);
+  EXPECT_TRUE(p2p::IsUnspecifiedHost(*to_a.back().address));
+  EXPECT_EQ(to_a.back().address->port(), to_b.back().address->port());
+  EXPECT_EQ(to_a.back().relay_token, to_b.back().relay_token);
+  EXPECT_NE(to_a.back().relay_token, 0u);
+  EXPECT_EQ(rendezvous.relay()->allocation_count(), 1u);
+  a.client.Disconnect();
+  b.client.Disconnect();
+  rendezvous.Stop();
+}
+
+TEST(RendezvousExchange, AClientIsNeverItsOwnMatch) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
+  EnableLoopbackRelay(config);
+  p2p::RendezvousServer rendezvous{config};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  RawClient a{rendezvous.bind_address()->port()};
+  a.Connect();
+  a.Gather(4444, {});
+  // asking for itself used to pair it with itself, relay port and all
+  a.Ask(a.Name());
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  EXPECT_EQ(a.offer_count.load(), 0);
+  EXPECT_EQ(rendezvous.relay()->allocation_count(), 0u);
+  a.client.Disconnect();
+  rendezvous.Stop();
+}
+
+TEST(RendezvousExchange, ARelayHostThatDoesNotResolveRefusesToStart) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
+  EnableLoopbackRelay(config);
+  config.relay_host = "no-such-host.invalid";
+  p2p::RendezvousServer rendezvous{config};
+  EXPECT_EQ(rendezvous.Start(), Result::InvalidAddress)
+      << "a bad relay host is a configuration error, not a crash later";
+}
+
+TEST(RendezvousExchange, NoRelayForATCPPunch) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::TCP);
+  EnableLoopbackRelay(config);
+  p2p::RendezvousServer rendezvous{config};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+  RawClient a{rendezvous.bind_address()->port()};
+  RawClient b{rendezvous.bind_address()->port()};
+  a.Connect();
+  b.Connect();
+  a.Gather(4444, {});
+  b.Gather(5555, {});
+  Exchange(a, b);
+  EXPECT_EQ(a.Offered().size(), 1u) << "a TCP punch cannot use a UDP relay";
+  EXPECT_EQ(rendezvous.relay()->allocation_count(), 0u);
+  a.client.Disconnect();
+  b.client.Disconnect();
+  rendezvous.Stop();
+}
+
+// --- The wire format --------------------------------------------------------------
+
+TEST(RendezvousProtocol, GatheringRoundTripsEveryCandidate) {
+  auto packet = std::make_shared<p2p::GatheringPacket>();
+  packet->punch_port_ = 7000;
+  packet->candidates_.push_back(Cand(p2p::CandidateType::Reflexive, "198.51.100.7", 7000));
+  packet->candidates_.push_back(Cand(p2p::CandidateType::Host, "10.0.0.1", 7000));
+  packet->candidates_.push_back(Cand(p2p::CandidateType::Host, "127.0.0.1", 7000));
+
+  p2p::GatheringSerializer serializer;
   auto buffer = std::make_shared<Buffer>(Endianness::BigEndian);
   serializer.SerializeTyped(packet, buffer);
   auto back = serializer.DeserializeTyped(buffer);
 
   ASSERT_NE(back, nullptr);
   EXPECT_EQ(back->punch_port_, 7000);
-  ASSERT_EQ(back->local_endpoints_.size(), 3u);
-  EXPECT_EQ(back->local_endpoints_[0]->readable(), "10.0.0.1:7000");
-  EXPECT_EQ(back->local_endpoints_[1]->readable(), "192.168.1.9:7000");
-  EXPECT_EQ(back->local_endpoints_[2]->readable(), "127.0.0.1:7000");
+  EXPECT_EQ(Readable(back->candidates_),
+            (std::vector<std::string>{"Reflexive 198.51.100.7:7000",
+                                      "Host 10.0.0.1:7000",
+                                      "Host 127.0.0.1:7000"}));
 }
 
-TEST(RendezvousPrivateEndpoints, AnOversizedClaimIsRefused) {
+TEST(RendezvousProtocol, OfferRoundTripsARelayedToken) {
+  auto packet = std::make_shared<p2p::PunchOfferPacket>();
+  packet->target_peer_ = "peer";
+  packet->punch_id_ = 0x1122334455667788ULL;
+  packet->connection_type_ = ConnectionType::ZDT;
+  packet->candidates_.push_back(Cand(p2p::CandidateType::Reflexive, "198.51.100.7", 7000));
+  packet->candidates_.push_back(Cand(p2p::CandidateType::Relayed, "0.0.0.0", 30001, 0xabcdefULL));
+
+  p2p::PunchOfferSerializer serializer;
+  auto buffer = std::make_shared<Buffer>(Endianness::BigEndian);
+  serializer.SerializeTyped(packet, buffer);
+  auto back = serializer.DeserializeTyped(buffer);
+
+  ASSERT_NE(back, nullptr);
+  EXPECT_EQ(back->target_peer_, "peer");
+  EXPECT_EQ(back->punch_id_, 0x1122334455667788ULL);
+  EXPECT_EQ(back->connection_type_, ConnectionType::ZDT);
+  ASSERT_EQ(back->candidates_.size(), 2u);
+  EXPECT_EQ(back->candidates_[0].relay_token, 0u);
+  EXPECT_EQ(back->candidates_[1].type, p2p::CandidateType::Relayed);
+  EXPECT_EQ(back->candidates_[1].relay_token, 0xabcdefULL);
+  EXPECT_TRUE(p2p::IsUnspecifiedHost(*back->candidates_[1].address));
+  EXPECT_EQ(back->candidates_[1].address->port(), 30001);
+}
+
+TEST(RendezvousProtocol, AnOversizedCandidateListIsRefused) {
   // a count past the cap must cost one refused frame, not an allocation
   auto buffer = std::make_shared<Buffer>(Endianness::BigEndian);
-  buffer->WriteInt<uint8_t>(static_cast<uint8_t>(p2p::kMaxPrivateEndpoints + 1));
   buffer->WriteInt<uint16_t>(7000);
+  buffer->WriteInt<uint8_t>(static_cast<uint8_t>(p2p::kMaxCandidates + 1));
 
-  p2p::IdentifySerializer serializer;
+  p2p::GatheringSerializer serializer;
   EXPECT_EQ(serializer.DeserializeTyped(buffer), nullptr);
 }
 
-TEST(RendezvousProtection, RequestSpamGetsTheClientDisconnected) {
-  ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
-  config.bind_address = "127.0.0.1";
-  config.bind_port = 0;
-  config.max_requests_per_window = 3;
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
+TEST(RendezvousProtocol, ATruncatedAddressIsRefused) {
+  // a short address body reads as 0.0.0.0:0, which no candidate ever is
+  auto buffer = std::make_shared<Buffer>(Endianness::BigEndian);
+  buffer->WriteInt<uint16_t>(7000);
+  buffer->WriteInt<uint8_t>(1);
+  buffer->WriteInt<uint8_t>(static_cast<uint8_t>(p2p::CandidateType::Host));
+  buffer->WriteInt<uint8_t>(4);  // an IPv4 address, then nothing
 
-  RawRelayClient c{relay.bind_address()->port()};
-  ASSERT_EQ(c.client.Bind(), Result::Success);
-  ASSERT_EQ(c.client.Connect(), Result::Success);
-  ASSERT_TRUE(WaitFor(c.connected, 5000));
-
-  for (int i = 0; i < 10; i++) {
-    auto ask = std::make_shared<p2p::ConnectPeerPacket>();
-    ask->target_peer_ = "whoever";
-    c.Session()->SendPacket(ask);
-  }
-  EXPECT_TRUE(WaitUntil([&]() { return !c.Session()->IsAlive(); }, 5000))
-      << "the relay must drop a client that spams it";
-  c.client.Disconnect();
-  relay.Stop();
+  p2p::GatheringSerializer serializer;
+  EXPECT_EQ(serializer.DeserializeTyped(buffer), nullptr);
 }
 
-TEST(RendezvousProtection, RelayHonorsServerOptions) {
-  ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
-  config.bind_address = "127.0.0.1";
-  config.bind_port = 0;
-  config.options.denylist.push_back(CIDRBlock::Parse("127.0.0.0/8"));
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
+TEST(RendezvousProtocol, AnUnknownCandidateTypeIsRefused) {
+  auto buffer = std::make_shared<Buffer>(Endianness::BigEndian);
+  buffer->WriteInt<uint16_t>(7000);
+  buffer->WriteInt<uint8_t>(1);
+  buffer->WriteInt<uint8_t>(9);  // no such type
+  buffer->WriteInetAddress(*InetAddress::from("10.0.0.1", 7000));
 
-  RawRelayClient c{relay.bind_address()->port(), /*timeout_seconds=*/1};
+  p2p::GatheringSerializer serializer;
+  EXPECT_EQ(serializer.DeserializeTyped(buffer), nullptr);
+}
+
+// --- Rendezvous protections ----------------------------------------------------
+
+TEST(RendezvousProtection, RequestSpamGetsTheClientDisconnected) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
+  config.max_requests_per_window = 3;
+  p2p::RendezvousServer rendezvous{config};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+
+  RawClient c{rendezvous.bind_address()->port()};
+  c.Connect();
+  for (int i = 0; i < 10; i++) {
+    c.Ask("whoever");
+  }
+  EXPECT_TRUE(WaitUntil([&]() { return !c.Session()->IsAlive(); }, 5000))
+      << "the rendezvous must drop a client that spams it";
+  c.client.Disconnect();
+  rendezvous.Stop();
+}
+
+TEST(RendezvousProtection, LinkHonorsServerOptions) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
+  config.options.denylist.push_back(CIDRBlock::Parse("127.0.0.0/8"));
+  p2p::RendezvousServer rendezvous{config};
+  ASSERT_EQ(rendezvous.Start(), Result::Success);
+
+  RawClient c{rendezvous.bind_address()->port(), /*timeout_seconds=*/1};
   ASSERT_EQ(c.client.Bind(), Result::Success);
   (void)c.client.Connect();
   EXPECT_FALSE(WaitFor(c.connected, 1500))
-      << "the relay listener must honor its admission rules";
-  relay.Stop();
+      << "the rendezvous listener must honor its admission rules";
+  rendezvous.Stop();
 }
 
-// --- Candidate racing ---------------------------------------------------------
+// --- TCP candidate racing --------------------------------------------------------
 
 namespace {
 
@@ -625,9 +889,10 @@ PortNumber FreePortLocal(int socket_type) {
 // both peers punch with `dead_count` dead candidates ahead of the live one.
 // The punch must still find the peer inside the budget, and it must not get
 // slower just because a multi-homed peer offered more addresses: a candidate
-// nobody answers has to cost a socket, not a share of the budget.
-void RunCandidateRace(ConnectionType type, PortNumber port_a, PortNumber port_b,
-                      int dead_count = 1) {
+// nobody answers has to cost a socket, not a share of the budget. The ZDT
+// counterpart is P2PHost.ManyDeadCandidatesDoNotSlowThePunch.
+void RunTCPCandidateRace(PortNumber port_a, PortNumber port_b,
+                         int dead_count = 1) {
   std::shared_ptr<InetAddress> local_a = InetAddress::from("127.0.0.1", port_a);
   std::shared_ptr<InetAddress> local_b = InetAddress::from("127.0.0.1", port_b);
   std::vector<std::shared_ptr<InetAddress>> to_b;
@@ -646,13 +911,14 @@ void RunCandidateRace(ConnectionType type, PortNumber port_a, PortNumber port_b,
   Result result_b = Result::Failure;
   std::shared_ptr<PeerSession> session_a;
   std::shared_ptr<PeerSession> session_b;
+  const std::chrono::milliseconds budget(10000);
   std::thread thread_a([&]() {
-    session_a = p2p::PunchSync(local_a, to_b, /*is_initiator=*/true, type,
-                               std::chrono::milliseconds(10000), &result_a);
+    session_a = p2p::tcp::PunchSync(local_a, to_b, /*is_initiator=*/true,
+                                    budget, &result_a);
   });
   std::thread thread_b([&]() {
-    session_b = p2p::PunchSync(local_b, to_a, /*is_initiator=*/false, type,
-                               std::chrono::milliseconds(10000), &result_b);
+    session_b = p2p::tcp::PunchSync(local_b, to_a, /*is_initiator=*/false,
+                                    budget, &result_b);
   });
   thread_a.join();
   thread_b.join();
@@ -666,59 +932,17 @@ void RunCandidateRace(ConnectionType type, PortNumber port_a, PortNumber port_b,
 
 }  // namespace
 
-TEST(PunchCandidates, ZDTRacesPastADeadCandidate) {
-  ASSERT_EQ(Init(), Result::Success);
-  RunCandidateRace(ConnectionType::ZDT, FreePortLocal(SOCK_DGRAM),
-                   FreePortLocal(SOCK_DGRAM));
-}
-
 TEST(PunchCandidates, TCPRacesPastADeadCandidate) {
   ASSERT_EQ(Init(), Result::Success);
-  RunCandidateRace(ConnectionType::TCP, FreePortLocal(SOCK_STREAM),
-                   FreePortLocal(SOCK_STREAM));
+  RunTCPCandidateRace(FreePortLocal(SOCK_STREAM), FreePortLocal(SOCK_STREAM));
 }
 
 // A multi-homed peer offers every address it has, and most of them are dead to
 // anyone not on that network. Walking them one at a time spent the budget on
 // the dead ones and left the live one a fraction of the round trips, which made
-// the punch fail the more candidates it was given. Both transports race, so
-// neither should care.
-TEST(PunchCandidates, ZDTIsUnhurtByManyDeadCandidates) {
-  ASSERT_EQ(Init(), Result::Success);
-  RunCandidateRace(ConnectionType::ZDT, FreePortLocal(SOCK_DGRAM),
-                   FreePortLocal(SOCK_DGRAM), /*dead_count=*/7);
-}
-
+// the punch fail the more candidates it was given. The race should not care.
 TEST(PunchCandidates, TCPIsUnhurtByManyDeadCandidates) {
   ASSERT_EQ(Init(), Result::Success);
-  RunCandidateRace(ConnectionType::TCP, FreePortLocal(SOCK_STREAM),
-                   FreePortLocal(SOCK_STREAM), /*dead_count=*/7);
-}
-
-TEST(PeerLocatorEndToEnd, AskingForAnUnknownPeerFailsTheRendezvous) {
-  ASSERT_EQ(Init(), Result::Success);
-  p2p::RendezvousServer::Config config;
-  config.bind_address = "127.0.0.1";
-  config.bind_port = 0;
-  p2p::RendezvousServer relay{config};
-  ASSERT_EQ(relay.Start(), Result::Success);
-  const PortNumber port = relay.bind_address()->port();
-
-  LocatorProbe a{port};
-  ASSERT_EQ(a.locator.Connect(), Result::Success);
-  ASSERT_TRUE(WaitFor(a.ready, 5000));
-
-  ASSERT_EQ(a.locator.AskPeer("no-such-peer"), Result::Success);
-  ASSERT_TRUE(WaitFor(a.failed, 5000))
-      << "the relay must answer an unknown name, not stay silent";
-  {
-    std::lock_guard<std::mutex> lock(a.mutex);
-    EXPECT_EQ(a.failed_phase, p2p::PeerLocatorPhase::Rendezvous);
-    EXPECT_EQ(a.failed_reason, Result::PeerNotFound);
-    EXPECT_EQ(a.failed_target, "no-such-peer");
-  }
-  EXPECT_FALSE(a.connected.load());
-  // the relay link survives the miss, so asking again stays possible
-  a.locator.Disconnect();
-  relay.Stop();
+  RunTCPCandidateRace(FreePortLocal(SOCK_STREAM), FreePortLocal(SOCK_STREAM),
+                      /*dead_count=*/7);
 }

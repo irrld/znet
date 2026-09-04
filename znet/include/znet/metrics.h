@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: stable (see the wiki, API Stability)
 
 //
 // Counters for a session and for a server, scoped the same way options are:

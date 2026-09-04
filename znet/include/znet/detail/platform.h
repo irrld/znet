@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: internal (see the wiki, API Stability)
 
 #ifndef ZNET_DETAIL_PLATFORM_H_
 #define ZNET_DETAIL_PLATFORM_H_

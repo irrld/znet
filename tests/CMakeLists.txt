@@ -67,6 +67,18 @@ target_link_libraries(znet-tests-tcp PRIVATE gtest_main znet)
 
 add_test(NAME tcp-transport-tests COMMAND znet-tests-tcp)
 
+add_executable(znet-tests-gather gather.cc)
+znet_apply_cxx_standard(znet-tests-gather)
+target_link_libraries(znet-tests-gather PRIVATE gtest_main znet)
+
+add_test(NAME gather-tests COMMAND znet-tests-gather)
+
+add_executable(znet-tests-relay relay.cc)
+znet_apply_cxx_standard(znet-tests-relay)
+target_link_libraries(znet-tests-relay PRIVATE gtest_main znet)
+
+add_test(NAME relay-tests COMMAND znet-tests-relay)
+
 add_executable(znet-tests-locator locator.cc)
 znet_apply_cxx_standard(znet-tests-locator)
 target_link_libraries(znet-tests-locator PRIVATE gtest_main znet)

@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: stable (see the wiki, API Stability)
 
 //
 // Internal: a private member of PeerSession, public only because that member

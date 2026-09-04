@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: internal (see the wiki, API Stability)
 
 //
 // windows.h, reached through sys_net.h so winsock2 is always first. Empty on

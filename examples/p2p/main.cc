@@ -13,8 +13,10 @@
 #include "znet/peer_session.h"
 #include "znet/init.h"
 
-#include <utility>
+#include <atomic>
 #include <deque>
+#include <thread>
+#include <utility>
 #include "cxxopts.h"
 
 using namespace znet;
@@ -115,8 +117,12 @@ class MyPacketHandler : public PacketHandler<MyPacketHandler, PingPacket, PongPa
 
 // Keep the session alive so the connection persists after the locator completes.
 std::shared_ptr<PeerSession> session_;
+// set once the locator has either produced a session or given up
+std::atomic<bool> settled_{false};
 
-// Called when the peer connection is established.
+// Called when the peer connection is established. It fires on the host's
+// tick thread, with a session whose handshake has finished, so the codec and
+// handler belong right here.
 bool OnConnect(p2p::PeerConnectedEvent& event) {
   session_ = event.session();
   ZNET_LOG_INFO("Connected to peer! punch_id: {}", event.punch_id());
@@ -134,18 +140,17 @@ bool OnConnect(p2p::PeerConnectedEvent& event) {
   if (is_server) {
     SendPing(session_);
   }
+  settled_ = true;
   return false;
 }
 
 // Peer locator stuff
 std::unique_ptr<p2p::PeerLocator> locator_;
-std::shared_ptr<InetAddress> bind_endpoint_;
-std::shared_ptr<InetAddress> target_endpoint_;
 
 bool OnReady(p2p::PeerLocatorReadyEvent& event) {
   // Show your peer name, ask for the other party’s name, then call locator_->AskPeer(name).
   // This usually happens in UI, but for this example, it is taken from the console.
-  ZNET_LOG_INFO("Received peer name from relay: {}", event.peer_name());
+  ZNET_LOG_INFO("Received peer name from the rendezvous: {}", event.peer_name());
   std::string peer_name;
   ZNET_LOG_INFO("Enter peer name:");
   std::cin >> peer_name;
@@ -154,24 +159,24 @@ bool OnReady(p2p::PeerLocatorReadyEvent& event) {
 }
 
 bool OnClose(p2p::PeerLocatorCloseEvent& event) {
-  // If no session was created, you can retry here.
-  // Keep in mind that you have to do all the previous steps.
-  // locator->Connect()
-  // Wait for PeerLocatorReadyEvent
-  // Ask for a peer
-  // Wait for PeerConnectedEvent
+  // The link to the rendezvous ended. A punched session lives on; without
+  // one, Connect() again and handle the events again to retry.
+  settled_ = true;
   return false;
 }
 
 bool OnFailed(p2p::PeerLocatorFailedEvent& event) {
-  // The reason something went wrong. A Rendezvous failure (an unknown peer
-  // name) leaves the relay link up, so you can ask for another name; Relay
-  // and Punch failures are followed by PeerLocatorCloseEvent.
+  // The reason something went wrong. An Exchange failure (an unknown peer
+  // name) leaves the link up, so you can ask for another name; a Punch
+  // failure costs that one peer.
   ZNET_LOG_ERROR("P2P failed during {}: {}{}{}",
                  p2p::GetPeerLocatorPhaseString(event.phase()),
                  GetResultString(event.reason()),
                  event.target_peer().empty() ? "" : " while seeking ",
                  event.target_peer());
+  if (event.phase() != p2p::PeerLocatorPhase::Exchange) {
+    settled_ = true;
+  }
   return false;
 }
 
@@ -194,11 +199,11 @@ int main(int argc, char* argv[]) {
   // We are getting the relay information from the command line arguments
   // cxxopts can be removed, and options can be replaced with hard-coded values.
   cxxopts::Options opts(
-      "relay-client",
-      "relay-client is a test utility to test peer to peer connections");
+      "basic-p2p",
+      "basic-p2p connects two peers through a rendezvous server and pings");
   opts.add_options()
-      ("t,target", "Address of the relay server", cxxopts::value<std::string>())
-          ("p,port", "Port of the relay server",cxxopts::value<uint16_t>()->default_value("5001"))
+      ("t,target", "Address of the rendezvous server", cxxopts::value<std::string>())
+          ("p,port", "Port of the rendezvous server",cxxopts::value<uint16_t>()->default_value("5001"))
               ("h,help", "Print usage");
 
   auto parse_result = opts.parse(argc, argv);
@@ -216,24 +221,26 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  p2p::PeerLocatorConfig config{host, port};
-  // PeerLocator is not designed to be reused, before peer session is created
-  // it will stop, and regardless of the status of the punching, it will stay stopped
-  // This means that locator->Wait() function will return once punching results.
-
-  // To reuse the locator object, you have to call Connect, and handle the events again
-  // It will connect to the relay server, get a different peer name and then
-  // you can proceed to ask another peer.
+  p2p::PeerLocatorConfig config;
+  config.server_address = host;
+  config.server_port = port;
+  // The locator stays on the rendezvous after the punch, so more peers can
+  // be asked for over the same socket. This example wants one.
   locator_ = std::make_unique<p2p::PeerLocator>(config);
   locator_->SetEventCallback(ZNET_BIND_GLOBAL_FN(OnEvent));
 
-  ZNET_LOG_INFO("Connecting to relay on {}:{}...", host, port);
+  ZNET_LOG_INFO("Connecting to rendezvous on {}:{}...", host, port);
   if ((result = locator_->Connect()) != Result::Success) {
-    ZNET_LOG_ERROR("Failed to connect to relay! Reason: {}", GetResultString(result));
+    ZNET_LOG_ERROR("Failed to connect to rendezvous! Reason: {}", GetResultString(result));
     return 1;  // Failed to connect
   }
-  locator_->Wait();
-  // We wait for the session to complete here.
-  while (session_ && session_->IsAlive()) {}
+  while (!settled_) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  // The session outlives the exchange; wait for it here.
+  while (session_ && session_->IsAlive()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  locator_->Disconnect();
   znet::Cleanup();
 }

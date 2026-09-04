@@ -21,7 +21,7 @@
 - [x] Option to dump the received buffer when a packet fails to decode (CommonOptions::dump_on_decode_failure, capped at 512 bytes)
 - [x] Option to close the connection on invalid received packets (CommonOptions::max_invalid_frames, default 16, zero disables; counted per session and surfaced as the invalid_frames metric)
 - [x] Max concurrent connections (ZDT: config max_connections + NoFreeConnections)
-- [x] Peer to peer TCP hole-punching (also UDP/ZDT via PunchSyncZDT)
+- [x] Peer to peer TCP hole-punching (p2p::tcp::PunchSync and tcp::PeerLocator, kept apart from the ZDT path; no gathering or relay there)
 - [x] Validate IP addresses
 - [x] Public key authentication (ExportKeyingMaterial is the library primitive; examples/auth shows the full pattern with service-signed tokens and a session-bound client signature. Identity policy stays with the application.)
 - [x] Allowlists and denylists (ServerOptions::allowlist / denylist of CIDRBlocks; deny wins, ZDT refuses silently, v4 rules catch v4-mapped v6 sources)
@@ -35,9 +35,15 @@
 - [x] Version Negotiation (ZDT handshake, strict-equality + IncompatibleProtocolVersion)
 - [ ] Feature flag Negotiation (?)
 - [x] Automatic serialization of non-complex types (znet-reflect extension: deduced for aggregates, ZNET_REFLECT for the rest; C++17)
-- [x] Fully asynchronous P2P hole punching using an event-driven I/O model. (p2p::Host: one shared UDP socket, punch state machines on its tick, StartPunch never blocks; tests/p2p_host.cc)
-- [x] P2P mesh: locator stays on the relay and brokers punches to several peers (p2p::MeshLocator over Host; three-player mesh in tests/p2p_host.cc; relay loss ends matchmaking, not the mesh)
-- [ ] Rendezvous UDP observation (STUN-lite): observe the real public UDP mapping instead of assuming the NAT preserves the local port; the rendezvous listens on UDP too, hands the client a token over TCP, and the client echoes it from the punch socket so the server sees the real mapping
+- [x] Fully asynchronous P2P hole punching using an event-driven I/O model. (p2p::Host: one shared UDP socket, the gather and punch state machines (p2p::internal) on its tick, Gather and Punch never block; tests/p2p_host.cc)
+- [x] P2P mesh: locator stays on the rendezvous and brokers punches to several peers (p2p::PeerLocator over Host; three-player mesh in tests/p2p_host.cc; losing the link ends matchmaking, not the mesh)
+- [x] P2P as distinct steps with typed candidates: gather (Host, Reflexive), exchange (the broker adds Relayed), punch (PunchOffer). The rendezvous protocol is welcome, gathering, ask, offer.
+- [x] API stability tiers (wiki API-Stability page; every public header carries its tier)
+- [x] Rendezvous UDP observation (STUN-lite): observe the real public UDP mapping instead of assuming the NAT preserves the local port. (done the other way round: the client learns it. Host::Gather sends a padded Reflect from the punch socket to the relay and the answer names the mapping; the gathering carries it to the rendezvous as a Reflexive candidate, and the observed-address-plus-claimed-port guess is only the fallback when no reflector answered.)
+- [x] Relay fallback for peers that cannot punch. (p2p::RelayServer: one UDP port for every pairing, each told apart by a four-byte channel header, token-gated two-slot binding, datagrams forwarded verbatim so the ZDT handshake and the session keys stay end to end; the relay reads one byte plus the offline header and holds nothing that decrypts. The rendezvous allocates one per ZDT pairing and hands both peers a Relayed candidate; the punch binds it at once and lets it join the race after relay_delay, so a working direct path always wins.)
+- [ ] Relay: per-allocation rate or byte limit, so one pairing cannot use a relay host's whole uplink. Today only probes are throttled.
+- [ ] Relay: a remote allocation protocol, so a broker can use a relay on another host instead of embedding RelayServer; a standalone relay binary would follow from it.
+- [ ] Gather: flag a symmetric NAT (two reflectors, two mappings) so a punch can go straight to the relay instead of waiting out relay_delay.
 - [x] Add UDP transport (ZDT) and UDP client/server backends, including UDP hole punching for P2P (PunchSyncZDT).
 - [x] Enhance error events for P2P connection failures with granular, actionable reasons. (PeerLocatorFailedEvent with phase Relay/Rendezvous/Punch + Result; PeerNotFoundPacket answers unknown names; ClientConnectionFailedEvent covers a handshake that dies before ready)
 - [x] Check if PeerLocator's destructor automatically joins its internal thread. (it joined via ~Task but deadlocked: RequestStop never woke the cv wait, and the stop-only predicate also made the punch branch unreachable; both fixed, regression tests in tests/locator.cc)

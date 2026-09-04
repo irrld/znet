@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: stable (see the wiki, API Stability)
 
 //
 // The umbrella: everything a typical client or server application needs.

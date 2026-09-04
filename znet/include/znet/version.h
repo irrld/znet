@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: stable (see the wiki, API Stability)
 
 //
 // znet's version. This header is the single source of truth: CMake parses the
@@ -26,7 +27,7 @@
 #define ZNET_VERSION_H_
 
 #define ZNET_VERSION_MAJOR 4
-#define ZNET_VERSION_MINOR 0
+#define ZNET_VERSION_MINOR 1
 #define ZNET_VERSION_PATCH 0
 
 /**

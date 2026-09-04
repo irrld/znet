@@ -7,6 +7,7 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: stable (see the wiki, API Stability)
 
 #ifndef ZNET_CLIENT_H_
 #define ZNET_CLIENT_H_

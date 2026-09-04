@@ -12,7 +12,7 @@
 // TCP hole-punch: simultaneous connect() from both peers, driven by select().
 //
 
-#include "dialer_internal.h"
+#include "znet/p2p/tcp/punch.h"
 
 #include "znet/backends/tcp.h"
 #include "znet/detail/socket_ops.h"
@@ -26,6 +26,7 @@
 
 namespace znet {
 namespace p2p {
+namespace tcp {
 namespace {
 
 int LastErr() {
@@ -244,13 +245,11 @@ std::shared_ptr<PeerSession> RaceCandidatesOnce(
   return nullptr;
 }
 
-}  // namespace
-
-std::shared_ptr<PeerSession> PunchSyncTCP(const std::shared_ptr<InetAddress>& local,
-                                       const std::vector<std::shared_ptr<InetAddress>>& peers,
-                                       Result* out_result,
-                                       bool is_initiator,
-                                       int timeout_ms) {
+// Rounds of concurrent connects until one pairs or the budget runs out.
+std::shared_ptr<PeerSession> RaceUntilPaired(
+    const std::shared_ptr<InetAddress>& local,
+    const std::vector<std::shared_ptr<InetAddress>>& peers, bool is_initiator,
+    std::chrono::steady_clock::time_point deadline, Result* out_result) {
   if (!local || !local->is_valid() || peers.empty()) {
     *out_result = Result::InvalidAddress;
     return nullptr;
@@ -267,8 +266,6 @@ std::shared_ptr<PeerSession> PunchSyncTCP(const std::shared_ptr<InetAddress>& lo
   // a TCP punch is a simultaneous open, and a SYN that lands before the peer
   // has bound its port is answered with RST. One round is a coin flip on
   // startup skew; repeating rounds inside the budget is what makes it a punch.
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   Result last_result = Result::Timeout;
   Result last_logged = Result::Success;
   bool log_bind_failure = true;
@@ -323,5 +320,34 @@ std::shared_ptr<PeerSession> PunchSyncTCP(const std::shared_ptr<InetAddress>& lo
   return nullptr;
 }
 
+}  // namespace
+
+std::shared_ptr<PeerSession> PunchSync(
+    const std::shared_ptr<InetAddress>& local,
+    const std::vector<std::shared_ptr<InetAddress>>& candidates,
+    bool is_initiator, std::chrono::milliseconds timeout, Result* out_result) {
+  // one budget for the punch and the handshake together, so the caller's
+  // timeout still means what it says
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  Result reason = Result::Failure;
+  std::shared_ptr<PeerSession> session =
+      RaceUntilPaired(local, candidates, is_initiator, deadline, &reason);
+  // the race confirms pairing inside its retry loop, so this is usually
+  // already true; a session that punched through but never settles is a
+  // failed punch, not a session to hand back
+  if (session && !WaitForPairing(session, deadline)) {
+    ZNET_LOG_WARN("Punched session to {} never finished its handshake",
+                  session->remote_address()->readable());
+    session->Close();
+    session = nullptr;
+    reason = Result::Timeout;
+  }
+  if (out_result != nullptr) {
+    *out_result = reason;
+  }
+  return session;
+}
+
+}  // namespace tcp
 }  // namespace p2p
 }  // namespace znet

@@ -1,3 +1,4 @@
+// API stability: internal (see the wiki, API Stability)
 
 //
 //    Copyright 2023 Metehan Gezer

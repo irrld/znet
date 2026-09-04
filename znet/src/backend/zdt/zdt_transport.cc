@@ -133,8 +133,20 @@ void ZDTTransportLayer::DrainSocket() {
       break;
     }
     recv_scratch_.CommitWrite(len);
-    inbox_->Push(Buffer(recv_scratch_.data(), recv_scratch_.size(),
-                        Endianness::BigEndian),
+    const char* data = recv_scratch_.data();
+    size_t size = recv_scratch_.size();
+    // through a relay every datagram arrives wrapped in this channel
+    if (connection_.relay_channel != 0) {
+      uint32_t channel = 0;
+      if (!ReadRelayHeader(reinterpret_cast<const uint8_t*>(data), size,
+                           channel) ||
+          channel != connection_.relay_channel) {
+        continue;
+      }
+      data += kZDTRelayHeaderSize;
+      size -= kZDTRelayHeaderSize;
+    }
+    inbox_->Push(Buffer(data, size, Endianness::BigEndian),
                  config_.max_inbox_datagrams);
   }
 }
@@ -217,11 +229,25 @@ bool ZDTTransportLayer::OnRecord(const ZDTRecord& record, const uint8_t* data,
   return true;
 }
 
+uint16_t ZDTTransportLayer::DatagramMTU() const {
+  const uint16_t mtu = connection_.mtu != 0
+                           ? connection_.mtu
+                           : ZDTPayloadForLinkMTU(config_.mtu_ladder.back(),
+                                                  peer_->ipv());
+  if (connection_.relay_channel == 0 || mtu <= kZDTRelayHeaderSize) {
+    return mtu;
+  }
+  return static_cast<uint16_t>(mtu - kZDTRelayHeaderSize);
+}
+
+void ZDTTransportLayer::BeginDatagram(Buffer& datagram) const {
+  if (connection_.relay_channel != 0) {
+    WriteRelayHeader(datagram, connection_.relay_channel);
+  }
+}
+
 void ZDTTransportLayer::FlushOutbound() {
-  uint16_t mtu = connection_.mtu != 0
-                     ? connection_.mtu
-                     : ZDTPayloadForLinkMTU(config_.mtu_ladder.back(),
-                                            peer_->ipv());
+  uint16_t mtu = DatagramMTU();
   const size_t floor = kZDTHeaderReserve + kZDTFragRecordHeaderSize + 1;
   if (mtu < floor) {
     mtu = static_cast<uint16_t>(floor);
@@ -483,10 +509,7 @@ WireSeq ZDTTransportLayer::SendBatch(uint8_t extra_flags,
     record_bytes += ZDTRecordSize(batch[i].record.flags & kRecFragment,
                                   batch[i].payload_len);
   }
-  const size_t mtu = connection_.mtu != 0
-                         ? connection_.mtu
-                         : ZDTPayloadForLinkMTU(config_.mtu_ladder.back(),
-                                                peer_->ipv());
+  const size_t mtu = DatagramMTU();
   const size_t used = kZDTHeaderSize + record_bytes;
   // how far back is worth describing: anything older the peer has already seen
   // acked, or it could not have kept sending. The +64 is slack for reordering.
@@ -503,6 +526,7 @@ WireSeq ZDTTransportLayer::SendBatch(uint8_t extra_flags,
 
   send_scratch_.Reset();
   Buffer& datagram = send_scratch_;
+  BeginDatagram(datagram);
   WriteZDTHeader(datagram, header);
   RetireSentPacket(header.packet_seq);
   SentInfo& info = sent_packets_[header.packet_seq];
@@ -906,6 +930,7 @@ Result ZDTTransportLayer::Close(CloseOptions options) {
     header.flags = static_cast<uint8_t>(kFlagOnline | kFlagFin);
     header.packet_seq = 0;
     Buffer datagram(Endianness::BigEndian);
+    BeginDatagram(datagram);
     WriteZDTHeader(datagram, header);
     socket_->SendTo(*peer_, datagram.data(), datagram.size());
   }

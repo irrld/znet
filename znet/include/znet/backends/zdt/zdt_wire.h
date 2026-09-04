@@ -12,6 +12,7 @@
 // messages, MTU arithmetic and the return-routability cookie. No connection
 // state lives here; everything is a value type or a pure function.
 //
+// API stability: internal (see the wiki, API Stability)
 
 #ifndef ZNET_BACKENDS_ZDT_ZDT_WIRE_H_
 #define ZNET_BACKENDS_ZDT_ZDT_WIRE_H_
@@ -51,10 +52,22 @@ ZNET_INLINE_CONSTEXPR std::array<uint8_t, 8> kZDTMagic = {'Z', 'N', 'E', 'T',
 // online datagram flags (byte 0), connection-level only. bit 7 separates
 // connected-state datagrams from offline handshake messages, which the demux
 // keys on. Anything about an individual message lives in its record flags.
+// bit 6 is reserved: with bit 7 it marks a relay-wrapped datagram (see
+// kZDTRelayMarker), so an online datagram never sets it.
 ZNET_INLINE_CONSTEXPR uint8_t kFlagFin = 1u << 0;     // graceful close
 ZNET_INLINE_CONSTEXPR uint8_t kFlagPing = 1u << 1;    // keepalive probe
 ZNET_INLINE_CONSTEXPR uint8_t kFlagPong = 1u << 2;    // keepalive reply
 ZNET_INLINE_CONSTEXPR uint8_t kFlagOnline = 1u << 7;  // online-datagram marker
+
+// --- Relay channel header ----------------------------------------------------
+// every datagram between a peer and a p2p::RelayServer, in both directions,
+// carries marker(1) + channel(3) in front of the ZDT datagram, so one relay
+// port can serve every pairing and the receiving host can tell relayed peers
+// apart. the marker is bits 7 and 6, which no ZDT datagram ever has together,
+// and no offline id reaches 0x80, so it is unambiguous on any socket.
+ZNET_INLINE_CONSTEXPR uint8_t kZDTRelayMarker = 0xC0;
+ZNET_INLINE_CONSTEXPR size_t kZDTRelayHeaderSize = 4;
+ZNET_INLINE_CONSTEXPR uint32_t kZDTMaxRelayChannel = 0xFFFFFFu;
 
 // per-record flags (byte 0 of each message record).
 ZNET_INLINE_CONSTEXPR uint8_t kRecReliable = 1u << 0;  // retransmit until acked
@@ -72,7 +85,20 @@ enum class ZDTOfflineMsg : uint8_t {
   AlreadyConnected = 0x07,
   ConnectionBanned = 0x08,
   Punch = 0x09,  // P2P NAT hole-punch keepalive (not part of the client/server flow)
+  // between a peer and a p2p::RelayServer; none of these appear in the
+  // client/server flow either. See znet/p2p/relay_server.h.
+  RelayBind = 0x0A,   // peer -> relay: token(8)
+  RelayBound = 0x0B,  // relay -> peer: token(8), channel(4)
+  Reflect = 0x0C,     // peer -> relay: nonce(8), padded to kZDTReflectSize
+  Reflected = 0x0D,   // relay -> peer: nonce(8), observed address
 };
+
+// id(1) + magic
+ZNET_INLINE_CONSTEXPR size_t kZDTOfflineHeaderSize = 1 + kZDTMagic.size();
+// a Reflect is padded to this, and a Reflected is always smaller, so the
+// reflector cannot be used to amplify toward a spoofed source. Shorter ones
+// are ignored.
+ZNET_INLINE_CONSTEXPR size_t kZDTReflectSize = 64;
 
 // a datagram is one header followed by zero or more message records, so small
 // messages share one instead of each paying for its own. zero records is a valid
@@ -218,6 +244,37 @@ void WriteOfflineHeader(Buffer& buffer, ZDTOfflineMsg id);
 // reads and validates an offline header (id < 0x80 and correct magic). on success
 // the read cursor is left just past the magic and `out_id` holds the message id.
 bool ReadOfflineHeader(Buffer& buffer, ZDTOfflineMsg& out_id);
+// the same check on raw bytes, for a loop that must not build a Buffer per
+// datagram. true when `data` carries a valid offline header.
+bool PeekOfflineHeader(const uint8_t* data, size_t len, ZDTOfflineMsg& out_id);
+
+// big-endian field reads off raw bytes, the same way Buffer would read them.
+inline uint64_t ReadBigEndian64(const uint8_t* data) {
+  uint64_t value = 0;
+  for (int i = 0; i < 8; i++) {
+    value = (value << 8) | data[i];
+  }
+  return value;
+}
+
+// the relay channel header, written in front of a datagram and read off raw
+// bytes. ReadRelayHeader is true when `data` starts with one; the payload
+// then begins kZDTRelayHeaderSize in.
+inline void WriteRelayHeader(Buffer& buffer, uint32_t channel) {
+  buffer.WriteInt<uint8_t>(kZDTRelayMarker);
+  buffer.WriteInt<uint8_t>(static_cast<uint8_t>((channel >> 16) & 0xFFu));
+  buffer.WriteInt<uint8_t>(static_cast<uint8_t>((channel >> 8) & 0xFFu));
+  buffer.WriteInt<uint8_t>(static_cast<uint8_t>(channel & 0xFFu));
+}
+inline bool ReadRelayHeader(const uint8_t* data, size_t len,
+                            uint32_t& out_channel) {
+  if (len < kZDTRelayHeaderSize || data[0] != kZDTRelayMarker) {
+    return false;
+  }
+  out_channel = (static_cast<uint32_t>(data[1]) << 16) |
+                (static_cast<uint32_t>(data[2]) << 8) | data[3];
+  return out_channel != 0;
+}
 
 // --- Return-routability cookie ------------------------------------------------
 // server issues HMAC(secret[epoch], addr, epoch) in Reply1 holding no state, and

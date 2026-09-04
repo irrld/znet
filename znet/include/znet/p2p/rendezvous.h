@@ -7,54 +7,75 @@
 //
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
+// API stability: experimental (see the wiki, API Stability)
 
 #ifndef ZNET_P2P_RENDEZVOUS_H_
 #define ZNET_P2P_RENDEZVOUS_H_
 
+#include "znet/p2p/punch.h"
 #include "znet/server.h"
 
 namespace znet {
 namespace p2p {
 
-// Rendezvous flow: (C1 is the first client, C2 is the second client, S is the server)
-// IdentifyPacket C1 -> S
-// SetPeerNamePacket S -> C1 - Rendezvous server selects a unique name and replies
+// Rendezvous flow (C is a client, S the server):
 //
-// IdentifyPacket C2 -> S
-// SetPeerNamePacket S -> C2 - Rendezvous server selects a unique name and replies
+// C connects, and S names it at once:
+// WelcomePacket      S -> C  protocol version, peer name, the endpoint S
+//                            observed, the reflectors to gather from, the
+//                            punch transport
+// GatheringPacket    C -> S  punch port and candidates (Host::Gather). May be
+//                            repeated; the latest replaces the rest
+// ConnectPeerPacket  C -> S  asks for a peer by name. An unknown name is
+//                            answered with PeerNotFoundPacket and not queued:
+//                            if the target shows up later, ask again
+// PunchOfferPacket   S -> C  to both, once each asked for the other: the
+//                            other's candidates, reflexive then host, plus a
+//                            relayed one when the server runs a relay
 //
-// ConnectPeerPacket C1 -> S - C1 asks to connect to C2's peer name
-// ConnectPeerPacket C2 -> S - C2 asks to connect to C1's peer name
-//
-// A ConnectPeerPacket naming a peer the server does not know is answered with
-// PeerNotFoundPacket. Asking is not queued: if the target identifies later,
-// the asker has to ask again.
-//
-// When the server sees that two peers want to connect to each other,
-// it will send these packets with each others' information
-//
-// StartPunchRequestPacket S -> C1
-// StartPunchRequestPacket S -> C2
+// A reflector or relayed candidate whose host is unspecified (0.0.0.0) lives
+// on the rendezvous host itself; the client substitutes the address it
+// reached the server at. See IsUnspecifiedHost.
+
+// bumped whenever the packets below change shape; the welcome carries it and
+// a client that disagrees fails at once instead of waiting for a name that
+// never comes
+ZNET_INLINE_CONSTEXPR uint8_t kRendezvousProtocolVersion = 1;
 
 // wire ids of the rendezvous protocol; plain PacketIds, usable directly with
 // Codec::Add()
-ZNET_INLINE_CONSTEXPR PacketId kPacketIdentify = 0;
-ZNET_INLINE_CONSTEXPR PacketId kPacketSetPeerName = 1;
+ZNET_INLINE_CONSTEXPR PacketId kPacketWelcome = 0;
+ZNET_INLINE_CONSTEXPR PacketId kPacketGathering = 1;
 ZNET_INLINE_CONSTEXPR PacketId kPacketConnectPeer = 2;
-ZNET_INLINE_CONSTEXPR PacketId kPacketStartPunchRequest = 3;
+ZNET_INLINE_CONSTEXPR PacketId kPacketPunchOffer = 3;
 ZNET_INLINE_CONSTEXPR PacketId kPacketPeerNotFound = 4;
 
-// Cap on the private endpoints a peer may claim
-ZNET_INLINE_CONSTEXPR size_t kMaxPrivateEndpoints = 32;
+// Cap on the reflectors a welcome may name
+ZNET_INLINE_CONSTEXPR size_t kMaxReflectors = 8;
+
+/** @brief Whether the address names no host (0.0.0.0 or ::), which on the
+ *         wire means "the rendezvous host itself". */
+inline bool IsUnspecifiedHost(const InetAddress& address) {
+  const std::string key = address.host_key();
+  if (key.empty()) {
+    return false;
+  }
+  for (const char byte : key) {
+    if (byte != 0) {
+      return false;
+    }
+  }
+  return true;
+}
 
 namespace detail {
 
 inline void WriteEndpoints(
     const std::shared_ptr<Buffer>& buffer,
-    const std::vector<std::shared_ptr<InetAddress>>& endpoints) {
+    const std::vector<std::shared_ptr<InetAddress>>& endpoints, size_t cap) {
   size_t count = endpoints.size();
-  if (count > kMaxPrivateEndpoints) {
-    count = kMaxPrivateEndpoints;
+  if (count > cap) {
+    count = cap;
   }
   buffer->WriteInt<uint8_t>(static_cast<uint8_t>(count));
   for (size_t i = 0; i < count; i++) {
@@ -62,16 +83,19 @@ inline void WriteEndpoints(
   }
 }
 
-// Returns false on a corrupt address, so the caller can refuse the frame.
+// Returns false on a corrupt address, so the caller can refuse the frame. A
+// truncated address reads back as port 0, which no endpoint here ever has,
+// so that is refused too.
 inline bool ReadEndpoints(const std::shared_ptr<Buffer>& buffer,
-                          std::vector<std::shared_ptr<InetAddress>>& out) {
+                          std::vector<std::shared_ptr<InetAddress>>& out,
+                          size_t cap) {
   const uint8_t count = buffer->ReadInt<uint8_t>();
-  if (count > kMaxPrivateEndpoints) {
+  if (count > cap) {
     return false;
   }
   for (uint8_t i = 0; i < count; i++) {
     auto address = buffer->ReadInetAddress();
-    if (!address) {
+    if (!address || address->port() == 0) {
       return false;
     }
     out.push_back(std::move(address));
@@ -79,31 +103,100 @@ inline bool ReadEndpoints(const std::shared_ptr<Buffer>& buffer,
   return true;
 }
 
+// type(1), address, and for a Relayed one its token(8); at most
+// kMaxCandidates of them. Public so a broker of your own can carry the same
+// type on its own packets.
+inline void WriteCandidates(const std::shared_ptr<Buffer>& buffer,
+                            const std::vector<Candidate>& candidates) {
+  size_t count = candidates.size();
+  if (count > kMaxCandidates) {
+    count = kMaxCandidates;
+  }
+  buffer->WriteInt<uint8_t>(static_cast<uint8_t>(count));
+  for (size_t i = 0; i < count; i++) {
+    const Candidate& candidate = candidates[i];
+    buffer->WriteInt<uint8_t>(static_cast<uint8_t>(candidate.type));
+    buffer->WriteInetAddress(*candidate.address);
+    if (candidate.type == CandidateType::Relayed) {
+      buffer->WriteInt<uint64_t>(candidate.relay_token);
+    }
+  }
+}
+
+// Returns false on an oversized list, an unknown type or a corrupt address,
+// so the caller can refuse the frame.
+inline bool ReadCandidates(const std::shared_ptr<Buffer>& buffer,
+                           std::vector<Candidate>& out) {
+  const uint8_t count = buffer->ReadInt<uint8_t>();
+  if (count > kMaxCandidates) {
+    return false;
+  }
+  for (uint8_t i = 0; i < count; i++) {
+    Candidate candidate;
+    const uint8_t raw_type = buffer->ReadInt<uint8_t>();
+    if (raw_type > static_cast<uint8_t>(CandidateType::Relayed)) {
+      return false;
+    }
+    candidate.type = static_cast<CandidateType>(raw_type);
+    candidate.address = buffer->ReadInetAddress();
+    if (!candidate.address || candidate.address->port() == 0) {
+      return false;  // corrupt, or truncated into 0.0.0.0:0
+    }
+    if (candidate.type == CandidateType::Relayed) {
+      candidate.relay_token = buffer->ReadInt<uint64_t>();
+    }
+    out.push_back(std::move(candidate));
+  }
+  return true;
+}
+
+inline void WriteConnectionType(const std::shared_ptr<Buffer>& buffer,
+                                ConnectionType type) {
+  buffer->WriteInt<uint8_t>(static_cast<uint8_t>(type));
+}
+
+// the type dispatches a punch; an unknown one is not worth guessing about
+inline bool ReadConnectionType(const std::shared_ptr<Buffer>& buffer,
+                               ConnectionType& out) {
+  const uint8_t raw_type = buffer->ReadInt<uint8_t>();
+  if (raw_type == static_cast<uint8_t>(ConnectionType::TCP)) {
+    out = ConnectionType::TCP;
+    return true;
+  }
+  if (raw_type == static_cast<uint8_t>(ConnectionType::ZDT)) {
+    out = ConnectionType::ZDT;
+    return true;
+  }
+  return false;
+}
+
 }  // namespace detail
 
-class IdentifyPacket : public Packet {
+class WelcomePacket : public Packet {
  public:
-  IdentifyPacket() : Packet(kPacketIdentify) {}
+  WelcomePacket() : Packet(kPacketWelcome) {}
 
-  // every address the client sees itself at, e.g. 192.168.1.5:54321. The
-  // server relays them to the matched peer as punch candidates, which is what
-  // lets two peers on a shared network reach each other. A multi-homed host
-  // cannot know which one the peer shares, so it offers all of them. Optional:
-  // peers that send none just punch on the public endpoint alone.
-  std::vector<std::shared_ptr<InetAddress>> local_endpoints_;
-  // the local port this client punches from: the relay connection's own port
-  // for the one-shot locator, the Host's UDP port for a mesh. The server
-  // pairs it with the address it observed. Note the assumption both cases
-  // share: the NAT maps local port N to public port N.
-  PortNumber punch_port_ = 0;
+  /** @brief kRendezvousProtocolVersion of the server. */
+  uint8_t protocol_version_ = kRendezvousProtocolVersion;
+  std::string peer_name_;
+  /** @brief The client as the server observed it, over the rendezvous link. */
+  std::shared_ptr<InetAddress> endpoint_;
+  /** @brief Where to gather the reflexive candidate from; empty when the
+   *         server offers no reflector. */
+  std::vector<std::shared_ptr<InetAddress>> reflectors_;
+  /** @brief The server picks the punch transport, so both peers agree. */
+  ConnectionType connection_type_ = ConnectionType::ZDT;
 };
 
-class SetPeerNamePacket : public Packet {
+class GatheringPacket : public Packet {
  public:
-  SetPeerNamePacket() : Packet(kPacketSetPeerName) {}
+  GatheringPacket() : Packet(kPacketGathering) {}
 
-  std::string peer_name_;
-  std::shared_ptr<InetAddress> endpoint_;
+  /** @brief The port this client punches from. When no reflexive candidate
+   *         is reported, the server pairs it with the address it observed. */
+  PortNumber punch_port_ = 0;
+  /** @brief Host and Reflexive only; a Relayed claim is dropped. */
+  std::vector<Candidate> candidates_;
 };
 
 class ConnectPeerPacket : public Packet {
@@ -113,18 +206,16 @@ class ConnectPeerPacket : public Packet {
   std::string target_peer_;
 };
 
-class StartPunchRequestPacket : public Packet {
+class PunchOfferPacket : public Packet {
  public:
-  StartPunchRequestPacket() : Packet(kPacketStartPunchRequest) {}
+  PunchOfferPacket() : Packet(kPacketPunchOffer) {}
 
   std::string target_peer_;
-  std::shared_ptr<InetAddress> target_endpoint_;
-  // the peer's claimed private addresses, minus any matching what the server
-  // observed; further punch candidates
-  std::vector<std::shared_ptr<InetAddress>> target_private_endpoints_;
-  // the server picks the punch transport, so both peers always agree
-  ConnectionType connection_type_ = ConnectionType::ZDT;
   uint64_t punch_id_ = 0;
+  ConnectionType connection_type_ = ConnectionType::ZDT;
+  /** @brief The peer's candidates, reflexive first, then host, then the
+   *         relayed one if any. */
+  std::vector<Candidate> candidates_;
 };
 
 class PeerNotFoundPacket : public Packet {
@@ -134,44 +225,48 @@ class PeerNotFoundPacket : public Packet {
   std::string target_peer_;
 };
 
-class IdentifySerializer : public PacketSerializer<IdentifyPacket> {
+class WelcomeSerializer : public PacketSerializer<WelcomePacket> {
  public:
-  IdentifySerializer() : PacketSerializer<IdentifyPacket>() {}
-  ~IdentifySerializer() override = default;
-
-  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<IdentifyPacket> packet, std::shared_ptr<Buffer> buffer) override {
-    detail::WriteEndpoints(buffer, packet->local_endpoints_);
-    buffer->WriteInt<uint16_t>(static_cast<uint16_t>(packet->punch_port_));
-    return buffer;
-  }
-
-  std::shared_ptr<IdentifyPacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
-    auto packet = std::make_shared<IdentifyPacket>();
-    if (!detail::ReadEndpoints(buffer, packet->local_endpoints_)) {
-      return nullptr;  // claimed an address, then sent a corrupt one
-    }
-    packet->punch_port_ = buffer->ReadInt<uint16_t>();
-    return packet;
-  }
-};
-
-class SetPeerNameSerializer : public PacketSerializer<SetPeerNamePacket> {
- public:
-  SetPeerNameSerializer() : PacketSerializer<SetPeerNamePacket>() {}
-  ~SetPeerNameSerializer() override = default;
-
-  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<SetPeerNamePacket> packet, std::shared_ptr<Buffer> buffer) override {
+  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<WelcomePacket> packet, std::shared_ptr<Buffer> buffer) override {
+    buffer->WriteInt<uint8_t>(packet->protocol_version_);
     buffer->WriteString(packet->peer_name_);
     buffer->WriteInetAddress(*packet->endpoint_);
+    detail::WriteEndpoints(buffer, packet->reflectors_, kMaxReflectors);
+    detail::WriteConnectionType(buffer, packet->connection_type_);
     return buffer;
   }
 
-  std::shared_ptr<SetPeerNamePacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
-    auto packet = std::make_shared<SetPeerNamePacket>();
+  std::shared_ptr<WelcomePacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
+    auto packet = std::make_shared<WelcomePacket>();
+    packet->protocol_version_ = buffer->ReadInt<uint8_t>();
     packet->peer_name_ = buffer->ReadString();
     packet->endpoint_ = buffer->ReadInetAddress();
     if (!packet->endpoint_) {
       return nullptr;  // corrupt address; refuse the frame, not the process
+    }
+    if (!detail::ReadEndpoints(buffer, packet->reflectors_, kMaxReflectors)) {
+      return nullptr;
+    }
+    if (!detail::ReadConnectionType(buffer, packet->connection_type_)) {
+      return nullptr;
+    }
+    return packet;
+  }
+};
+
+class GatheringSerializer : public PacketSerializer<GatheringPacket> {
+ public:
+  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<GatheringPacket> packet, std::shared_ptr<Buffer> buffer) override {
+    buffer->WriteInt<uint16_t>(static_cast<uint16_t>(packet->punch_port_));
+    detail::WriteCandidates(buffer, packet->candidates_);
+    return buffer;
+  }
+
+  std::shared_ptr<GatheringPacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
+    auto packet = std::make_shared<GatheringPacket>();
+    packet->punch_port_ = buffer->ReadInt<uint16_t>();
+    if (!detail::ReadCandidates(buffer, packet->candidates_)) {
+      return nullptr;
     }
     return packet;
   }
@@ -179,9 +274,6 @@ class SetPeerNameSerializer : public PacketSerializer<SetPeerNamePacket> {
 
 class ConnectPeerSerializer : public PacketSerializer<ConnectPeerPacket> {
  public:
-  ConnectPeerSerializer() : PacketSerializer<ConnectPeerPacket>() {}
-  ~ConnectPeerSerializer() override = default;
-
   std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<ConnectPeerPacket> packet, std::shared_ptr<Buffer> buffer) override {
     buffer->WriteString(packet->target_peer_);
     return buffer;
@@ -194,38 +286,24 @@ class ConnectPeerSerializer : public PacketSerializer<ConnectPeerPacket> {
   }
 };
 
-class StartPunchRequestSerializer : public PacketSerializer<StartPunchRequestPacket> {
+class PunchOfferSerializer : public PacketSerializer<PunchOfferPacket> {
  public:
-  StartPunchRequestSerializer() : PacketSerializer<StartPunchRequestPacket>() {}
-  ~StartPunchRequestSerializer() override = default;
-
-  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<StartPunchRequestPacket> packet, std::shared_ptr<Buffer> buffer) override {
+  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<PunchOfferPacket> packet, std::shared_ptr<Buffer> buffer) override {
     buffer->WriteString(packet->target_peer_);
-    buffer->WriteInetAddress(*packet->target_endpoint_);
-    detail::WriteEndpoints(buffer, packet->target_private_endpoints_);
     buffer->WriteInt<uint64_t>(packet->punch_id_);
-    buffer->WriteInt<uint8_t>(static_cast<uint8_t>(packet->connection_type_));
+    detail::WriteConnectionType(buffer, packet->connection_type_);
+    detail::WriteCandidates(buffer, packet->candidates_);
     return buffer;
   }
 
-  std::shared_ptr<StartPunchRequestPacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
-    auto packet = std::make_shared<StartPunchRequestPacket>();
+  std::shared_ptr<PunchOfferPacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
+    auto packet = std::make_shared<PunchOfferPacket>();
     packet->target_peer_ = buffer->ReadString();
-    packet->target_endpoint_ = buffer->ReadInetAddress();
-    if (!packet->target_endpoint_) {
-      return nullptr;  // corrupt address; refuse the frame, not the process
-    }
-    if (!detail::ReadEndpoints(buffer, packet->target_private_endpoints_)) {
+    packet->punch_id_ = buffer->ReadInt<uint64_t>();
+    if (!detail::ReadConnectionType(buffer, packet->connection_type_)) {
       return nullptr;
     }
-    packet->punch_id_ = buffer->ReadInt<uint64_t>();
-    const uint8_t raw_type = buffer->ReadInt<uint8_t>();
-    // the type dispatches a punch; an unknown one is not worth guessing about
-    if (raw_type == static_cast<uint8_t>(ConnectionType::TCP)) {
-      packet->connection_type_ = ConnectionType::TCP;
-    } else if (raw_type == static_cast<uint8_t>(ConnectionType::ZDT)) {
-      packet->connection_type_ = ConnectionType::ZDT;
-    } else {
+    if (!detail::ReadCandidates(buffer, packet->candidates_)) {
       return nullptr;
     }
     return packet;
@@ -234,9 +312,6 @@ class StartPunchRequestSerializer : public PacketSerializer<StartPunchRequestPac
 
 class PeerNotFoundSerializer : public PacketSerializer<PeerNotFoundPacket> {
  public:
-  PeerNotFoundSerializer() : PacketSerializer<PeerNotFoundPacket>() {}
-  ~PeerNotFoundSerializer() override = default;
-
   std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<PeerNotFoundPacket> packet, std::shared_ptr<Buffer> buffer) override {
     buffer->WriteString(packet->target_peer_);
     return buffer;
@@ -251,10 +326,10 @@ class PeerNotFoundSerializer : public PacketSerializer<PeerNotFoundPacket> {
 
 inline std::shared_ptr<Codec> BuildRendezvousCodec() {
   std::shared_ptr<znet::Codec> codec = std::make_shared<znet::Codec>();
-  codec->Add(kPacketIdentify, std::make_unique<IdentifySerializer>());
-  codec->Add(kPacketSetPeerName, std::make_unique<SetPeerNameSerializer>());
+  codec->Add(kPacketWelcome, std::make_unique<WelcomeSerializer>());
+  codec->Add(kPacketGathering, std::make_unique<GatheringSerializer>());
   codec->Add(kPacketConnectPeer, std::make_unique<ConnectPeerSerializer>());
-  codec->Add(kPacketStartPunchRequest, std::make_unique<StartPunchRequestSerializer>());
+  codec->Add(kPacketPunchOffer, std::make_unique<PunchOfferSerializer>());
   codec->Add(kPacketPeerNotFound, std::make_unique<PeerNotFoundSerializer>());
   return codec;
 }

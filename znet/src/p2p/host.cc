@@ -13,6 +13,8 @@
 #include "znet/backends/zdt.h"
 #include "znet/error.h"
 #include "znet/logger.h"
+#include "znet/p2p/internal/gather.h"
+#include "znet/p2p/internal/zdt_punch.h"
 
 #include <algorithm>
 #include <thread>
@@ -23,17 +25,7 @@ namespace p2p {
 using namespace backends;
 using clock = std::chrono::steady_clock;
 
-namespace {
-
-Buffer BuildOffline(ZDTOfflineMsg id) {
-  Buffer buffer(Endianness::BigEndian);
-  WriteOfflineHeader(buffer, id);
-  return buffer;
-}
-
-}  // namespace
-
-Host::Host(const Config& config) : config_(config) {}
+Host::Host(const HostConfig& config) : config_(config) {}
 
 Host::~Host() {
   Stop();
@@ -84,7 +76,17 @@ void Host::Stop() {
       punches_.push_back(std::move(punch));
     }
     pending_.clear();
+    for (auto& gathering : pending_gathers_) {
+      gathers_.push_back(std::move(gathering));
+    }
+    pending_gathers_.clear();
   }
+  for (auto& gathering : gathers_) {
+    if (gathering.on_done) {
+      gathering.on_done(Result::AlreadyStopped, {});
+    }
+  }
+  gathers_.clear();
   for (auto& punch : punches_) {
     if (punch.on_done) {
       punch.on_done(Result::AlreadyStopped, nullptr);
@@ -103,41 +105,65 @@ void Host::Stop() {
   }
 }
 
-void Host::StartPunch(std::vector<std::shared_ptr<InetAddress>> candidates,
-                      uint64_t punch_id, bool is_initiator,
-                      std::chrono::milliseconds timeout,
-                      PunchCallback on_done) {
-  Punch punch;
-  punch.candidates = std::move(candidates);
-  punch.is_initiator = is_initiator;
-  punch.punch_id = punch_id;
-  punch.connection.mtu = 1200;  // conservative; skips the ladder probe for P2P
-  punch.connection.local_guid = GenerateGuid();
-  punch.timeout = timeout;
-  punch.deadline = clock::now() + timeout;
-  punch.on_done = std::move(on_done);
-
-  bool refused = !running_.load() || punch.candidates.empty();
-  for (const auto& candidate : punch.candidates) {
-    refused = refused || !candidate || !candidate->is_valid();
-  }
-  if (refused) {
-    if (punch.on_done) {
-      punch.on_done(running_.load() ? Result::InvalidAddress
-                                    : Result::AlreadyStopped,
-                    nullptr);
+void Host::Gather(std::vector<std::shared_ptr<InetAddress>> reflectors,
+                  std::chrono::milliseconds timeout, GatherCallback on_done) {
+  Gathering gathering;
+  gathering.probe.reset(
+      new internal::ReflectProbe(std::move(reflectors), clock::now(), timeout));
+  gathering.on_done = std::move(on_done);
+  // running_ is checked under the same lock Stop() drains pending_gathers_
+  // under, so a gather cannot slip in between the drain and the socket close
+  // and lose its callback
+  std::unique_lock<std::mutex> lock(pending_mutex_);
+  if (!running_.load()) {
+    lock.unlock();
+    if (gathering.on_done) {
+      gathering.on_done(Result::AlreadyStopped, {});
     }
     return;
   }
-  {
-    std::lock_guard<std::mutex> lock(pending_mutex_);
-    pending_.push_back(std::move(punch));
+  pending_gathers_.push_back(std::move(gathering));
+}
+
+void Host::Punch(PunchOffer offer, PunchCallback on_done) {
+  Result refusal = Result::Success;
+  if (offer.candidates.empty()) {
+    refusal = Result::InvalidAddress;
   }
+  for (const auto& candidate : offer.candidates) {
+    if (!candidate.address || !candidate.address->is_valid()) {
+      refusal = Result::InvalidAddress;
+    } else if (candidate.type == CandidateType::Relayed &&
+               candidate.relay_token == 0) {
+      // a relay never accepts it, so the punch would only ever time out;
+      // a broker that forgot the token deserves to hear so at once
+      refusal = Result::InvalidArgument;
+    }
+  }
+  if (refusal != Result::Success) {
+    if (on_done) {
+      on_done(refusal, nullptr);
+    }
+    return;
+  }
+  PunchInFlight punch;
+  punch.machine.reset(new internal::ZDTPunch(std::move(offer), clock::now()));
+  punch.on_done = std::move(on_done);
+  std::unique_lock<std::mutex> lock(pending_mutex_);
+  if (!running_.load()) {
+    lock.unlock();
+    if (punch.on_done) {
+      punch.on_done(Result::AlreadyStopped, nullptr);
+    }
+    return;
+  }
+  pending_.push_back(std::move(punch));
 }
 
 void Host::TickLoop() {
   while (!task_.IsStopRequested()) {
     bool worked = DrainSocket();
+    worked = TickGathers() || worked;
     worked = TickPunches() || worked;
     worked = ProcessSessions() || worked;
     if (!worked) {
@@ -145,6 +171,17 @@ void Host::TickLoop() {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
+}
+
+std::string Host::RouteKey(const InetAddress& address, uint32_t channel) {
+  // the channel alone would let a stray from anywhere claim a relayed
+  // session; with the relay's address in the key it has to come from there
+  std::string key = address.readable();
+  if (channel != 0) {
+    key += '#';
+    key += std::to_string(channel);
+  }
+  return key;
 }
 
 bool Host::DrainSocket() {
@@ -159,12 +196,62 @@ bool Host::DrainSocket() {
       break;
     }
     any = true;
-    auto it = routes_.find(from->readable());
-    if (it != routes_.end()) {
-      it->second.transport->OnDatagram(buffer, len);
+    // a relayed datagram carries its channel in front; nothing else on this
+    // socket can start with the marker
+    const uint8_t* data = buffer;
+    size_t data_len = len;
+    uint32_t channel = 0;
+    if (buffer[0] == kZDTRelayMarker) {
+      if (!ReadRelayHeader(buffer, len, channel)) {
+        continue;
+      }
+      data += kZDTRelayHeaderSize;
+      data_len -= kZDTRelayHeaderSize;
+      if (data_len == 0) {
+        continue;
+      }
+    }
+    auto route = routes_.find(RouteKey(*from, channel));
+    if (route != routes_.end()) {
+      route->second.transport->OnDatagram(data, data_len);
       continue;
     }
-    HandleOffline(from, buffer, len);
+    HandleOffline(from, channel, data, data_len);
+  }
+  return any;
+}
+
+bool Host::TickGathers() {
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    for (auto& gathering : pending_gathers_) {
+      gathers_.push_back(std::move(gathering));
+    }
+    pending_gathers_.clear();
+  }
+  bool any = false;
+  const auto now = clock::now();
+  for (size_t i = 0; i < gathers_.size();) {
+    Gathering& gathering = gathers_[i];
+    any = gathering.probe->Tick(*socket_, now) || any;
+    if (!gathering.probe->Done(now)) {
+      i++;
+      continue;
+    }
+    // reflexive first: the broker's best candidate, and what it dedups the
+    // host ones against
+    std::vector<Candidate> candidates = gathering.probe->reflexive();
+    for (auto& host : internal::LocalCandidates(punch_port())) {
+      if (!internal::ContainsAddress(candidates, *host.address)) {
+        candidates.push_back(std::move(host));
+      }
+    }
+    Gathering done = std::move(gathers_[i]);
+    gathers_.erase(gathers_.begin() + static_cast<long>(i));
+    if (done.on_done) {
+      done.on_done(done.probe->result(), std::move(candidates));
+    }
+    any = true;
   }
   return any;
 }
@@ -178,18 +265,24 @@ bool Host::TickPunches() {
     pending_.clear();
   }
   // a punch toward a peer that already routes resolves with the live session,
-  // which is what a duplicate pairing amounts to
+  // which is what a duplicate pairing amounts to. Only a public identity
+  // counts: two peers on different networks can share a private address,
+  // and matching on one would hand the second punch the first peer's
+  // session. A relayed one is not known until it binds, so it never matches
   for (size_t i = 0; i < punches_.size();) {
     Route* existing = nullptr;
-    for (const auto& candidate : punches_[i].candidates) {
-      auto it = routes_.find(candidate->readable());
+    for (const auto& candidate : punches_[i].machine->offer().candidates) {
+      if (candidate.type != CandidateType::Reflexive) {
+        continue;
+      }
+      auto it = routes_.find(RouteKey(*candidate.address, 0));
       if (it != routes_.end()) {
         existing = &it->second;
         break;
       }
     }
     if (existing) {
-      Punch punch = std::move(punches_[i]);
+      PunchInFlight punch = std::move(punches_[i]);
       punches_.erase(punches_.begin() + static_cast<long>(i));
       if (punch.on_done) {
         if (existing->session->IsReady()) {
@@ -205,32 +298,13 @@ bool Host::TickPunches() {
   bool any = false;
   const auto now = clock::now();
   for (size_t i = 0; i < punches_.size();) {
-    Punch& punch = punches_[i];
-    if (now >= punch.deadline) {
-      FailPunch(i, Result::Timeout);
+    const internal::PunchOutcome outcome =
+        punches_[i].machine->Tick(*socket_, now);
+    if (outcome.state == internal::PunchOutcome::State::Failed) {
+      FailPunch(i, outcome.reason);
       continue;  // i now names the next punch
     }
-    // keep the hole open from both sides, toward every candidate
-    if (now - punch.last_punch > std::chrono::milliseconds(50)) {
-      Buffer datagram = BuildOffline(ZDTOfflineMsg::Punch);
-      for (const auto& candidate : punch.candidates) {
-        socket_->SendTo(*candidate, datagram.data(), datagram.size());
-      }
-      punch.last_punch = now;
-      any = true;
-    }
-    // the initiator also drives the handshake (Request1 doubles as a punch)
-    if (punch.is_initiator &&
-        now - punch.last_request > std::chrono::milliseconds(100)) {
-      Buffer request = BuildOffline(ZDTOfflineMsg::OpenConnectionRequest1);
-      request.WriteInt<uint8_t>(kZDTProtocolVersion);
-      request.WriteInt<uint64_t>(punch.connection.local_guid);
-      for (const auto& candidate : punch.candidates) {
-        socket_->SendTo(*candidate, request.data(), request.size());
-      }
-      punch.last_request = now;
-      any = true;
-    }
+    any = any || outcome.sent;
     i++;
   }
   return any;
@@ -285,110 +359,75 @@ void Host::ResolveWaiters(Route& route, Result result) {
 }
 
 void Host::HandleOffline(const std::shared_ptr<InetAddress>& from,
-                         const uint8_t* data, size_t len) {
-  // attribution is by source address: the punch whose candidate list holds
-  // the sender. A symmetric NAT rewriting ports defeats this, but it defeats
-  // the punch itself first.
-  size_t index = punches_.size();
-  for (size_t i = 0; i < punches_.size(); i++) {
-    for (const auto& candidate : punches_[i].candidates) {
-      if (candidate->readable() == from->readable()) {
-        index = i;
-        break;
+                         uint32_t channel, const uint8_t* data, size_t len) {
+  // attribution is by source address: the gather whose reflector answered,
+  // else the punch whose candidates hold the sender (and, through a relay,
+  // whose channel it is). A stray, or a peer whose punch already resolved,
+  // owns nothing.
+  if (channel == 0) {
+    for (auto& gathering : gathers_) {
+      if (gathering.probe->Owns(*from)) {
+        gathering.probe->OnDatagram(*from, data, len);
+        return;
       }
     }
-    if (index != punches_.size()) {
-      break;
-    }
   }
-  if (index == punches_.size()) {
-    return;  // a stray, or a peer whose punch already resolved
-  }
-  Punch& punch = punches_[index];
-
-  // online data means the initiator considers itself connected: the responder
-  // adopts the source and hands the datagram to the new transport
-  if ((data[0] & kFlagOnline) != 0) {
-    if (punch.is_initiator) {
-      return;  // shouldn't precede Reply2; ignore
+  for (size_t i = 0; i < punches_.size(); i++) {
+    if (!punches_[i].machine->Owns(*from, channel)) {
+      continue;
     }
-    CompletePunch(index, from, data, len);
+    const internal::PunchOutcome outcome =
+        punches_[i].machine->OnDatagram(*socket_, from, channel, data, len);
+    if (outcome.state == internal::PunchOutcome::State::Completed) {
+      CompletePunch(i, outcome);
+    } else if (outcome.state == internal::PunchOutcome::State::Failed) {
+      FailPunch(i, outcome.reason);
+    }
     return;
-  }
-
-  Buffer in(reinterpret_cast<const char*>(data), len, Endianness::BigEndian);
-  ZDTOfflineMsg id;
-  if (!ReadOfflineHeader(in, id) || id == ZDTOfflineMsg::Punch) {
-    return;  // stray or keepalive punch
-  }
-
-  if (!punch.is_initiator && id == ZDTOfflineMsg::OpenConnectionRequest1) {
-    uint8_t version = in.ReadInt<uint8_t>();
-    if (version != kZDTProtocolVersion) {
-      Buffer bad = BuildOffline(ZDTOfflineMsg::IncompatibleProtocolVersion);
-      bad.WriteInt<uint8_t>(kZDTProtocolVersion);
-      bad.WriteInt<uint64_t>(punch.connection.local_guid);
-      socket_->SendTo(*from, bad.data(), bad.size());
-      return;
-    }
-    punch.connection.remote_guid = in.ReadInt<uint64_t>();
-    Buffer reply = BuildOffline(ZDTOfflineMsg::OpenConnectionReply2);
-    reply.WriteInt<uint64_t>(punch.connection.local_guid);
-    reply.WriteInt<uint16_t>(punch.connection.mtu);
-    socket_->SendTo(*from, reply.data(), reply.size());
-    // stays pending until online data confirms the peer connected, so a lost
-    // Reply2 is simply re-answered on the next Request1
-    return;
-  }
-  if (punch.is_initiator && id == ZDTOfflineMsg::OpenConnectionReply2) {
-    punch.connection.remote_guid = in.ReadInt<uint64_t>();
-    uint16_t mtu = in.ReadInt<uint16_t>();
-    if (mtu != 0) {
-      punch.connection.mtu = std::min(punch.connection.mtu, mtu);
-    }
-    CompletePunch(index, from, nullptr, 0);
-    return;
-  }
-  if (punch.is_initiator && id == ZDTOfflineMsg::IncompatibleProtocolVersion) {
-    FailPunch(index, Result::IncompatibleVersion);
   }
 }
 
-void Host::CompletePunch(size_t index, const std::shared_ptr<InetAddress>& from,
-                         const uint8_t* first_datagram, size_t len) {
-  Punch punch = std::move(punches_[index]);
+void Host::CompletePunch(size_t index, const internal::PunchOutcome& outcome) {
+  PunchInFlight punch = std::move(punches_[index]);
   punches_.erase(punches_.begin() + static_cast<long>(index));
+  const PunchOffer& offer = punch.machine->offer();
+  const std::shared_ptr<InetAddress>& from = outcome.from;
 
+  // a relayed session wraps every datagram in the channel the relay handed
+  // out, and budgets its MTU for the header
+  ZDTConnection connection = punch.machine->connection();
+  connection.relay_channel = outcome.channel;
   auto inbox = std::make_shared<ZDTInbox>();
   auto transport = std::make_unique<ZDTTransportLayer>(
       socket_, from, config_.session_options.zdt, /*drains_own_socket=*/false,
-      inbox, punch.connection, config_.session_options.common);
+      inbox, connection, config_.session_options.common);
   ZDTTransportLayer* raw = transport.get();
-  if (first_datagram != nullptr) {
-    raw->OnDatagram(first_datagram, len);
+  if (outcome.first_datagram != nullptr) {
+    raw->OnDatagram(outcome.first_datagram, outcome.first_len);
   }
   auto session = std::make_shared<PeerSession>(
       local_address_, from, std::move(transport), ConnectionType::ZDT,
-      punch.is_initiator, /*self_managed=*/false, config_.session_options);
+      offer.is_initiator, /*self_managed=*/false, config_.session_options);
   Route route;
   route.transport = raw;
   route.session = session;
-  route.ready_deadline = clock::now() + punch.timeout;
+  route.ready_deadline = clock::now() + offer.timeout;
   if (punch.on_done) {
     route.waiters.push_back(std::move(punch.on_done));
   }
-  routes_[from->readable()] = std::move(route);
+  routes_[RouteKey(*from, outcome.channel)] = std::move(route);
   session_count_.store(routes_.size(), std::memory_order_relaxed);
   // ProcessSessions resolves the waiters once the handshake lands.
-  ZNET_LOG_INFO("P2P host: punched {} (punch id {}), handshaking",
-                from->readable(), punch.punch_id);
+  ZNET_LOG_INFO("P2P host: punched {} (punch id {}){}, handshaking",
+                from->readable(), offer.punch_id,
+                outcome.channel != 0 ? " through the relay" : "");
 }
 
 void Host::FailPunch(size_t index, Result reason) {
-  Punch punch = std::move(punches_[index]);
+  PunchInFlight punch = std::move(punches_[index]);
   punches_.erase(punches_.begin() + static_cast<long>(index));
-  ZNET_LOG_WARN("P2P host: punch {} failed: {}", punch.punch_id,
-                GetResultString(reason));
+  ZNET_LOG_WARN("P2P host: punch {} failed: {}",
+                punch.machine->offer().punch_id, GetResultString(reason));
   if (punch.on_done) {
     punch.on_done(reason, nullptr);
   }
