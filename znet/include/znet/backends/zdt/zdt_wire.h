@@ -297,9 +297,9 @@ inline bool ReadRelayHeader(const uint8_t* data, size_t len,
   return out_channel != 0;
 }
 
-// The connection id an online datagram carries, read straight off the bytes.
-// False when the flags do not set kFlagHasCid or the datagram is too short to
-// hold one. Lets the server route a migrated datagram before parsing the rest.
+// The connection id an online datagram carries, read straight off the bytes so
+// the server can route it before parsing the rest. False when the flags lack
+// kFlagHasCid or the datagram is too short to hold one.
 inline bool PeekCid(const uint8_t* data, size_t len, uint64_t& out_cid) {
   if (len < 1 + kZDTCidSize || !(data[0] & kFlagHasCid)) {
     return false;

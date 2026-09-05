@@ -61,13 +61,11 @@ struct Reflection {
 };
 
 /**
- * @brief The NAT-type verdict from a set of reflections.
- *
- * The mapping seen through one reflector is compared against one seen through
- * a reflector on a distinct host: agreeing is EndpointIndependent (one public
- * port whatever the destination), differing is AddressDependent (a fresh port
- * per destination, i.e. symmetric). Fewer than two distinct reflector hosts is
- * Unknown; two on the same host cannot tell the two apart, so they are skipped.
+ * @brief The NAT-type verdict from a set of reflections: the mappings two
+ *        reflectors on distinct hosts saw agreeing is EndpointIndependent,
+ *        differing is AddressDependent, and fewer than two distinct hosts is
+ *        Unknown. Same-host reflectors cannot tell the two apart, so they are
+ *        skipped.
  */
 NatType ClassifyNat(const std::vector<Reflection>& reflections);
 
@@ -119,9 +117,7 @@ class ReflectProbe {
     return reflexive_;
   }
 
-  /** @brief The verdict from two reflectors on distinct hosts: their mappings
-   *         agreeing is EndpointIndependent, differing is AddressDependent,
-   *         and fewer than two answering is Unknown. */
+  /** @brief This probe's verdict; see ClassifyNat. */
   ZNET_NODISCARD NatType nat_type() const;
 
  private:

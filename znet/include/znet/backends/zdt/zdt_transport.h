@@ -84,10 +84,9 @@ class ZDTTransportLayer : public TransportLayer {
   std::shared_ptr<InetAddress> peer() const { return peer_; }
   std::shared_ptr<ZDTInbox> inbox() const { return inbox_; }
 
-  // Retargets the send path to `new_peer` after path validation confirmed the
-  // peer moved there. Thread-safe: the caller may be any thread, but the swap
-  // itself is applied on this transport's own thread at the next tick, so peer_
-  // stays single-threaded and the send path never reads a torn pointer.
+  // Retargets the send path to `new_peer` after path validation. Callable from
+  // any thread; the swap lands on the transport thread at the next tick, so
+  // peer_ is never written from elsewhere.
   void MigratePeer(std::shared_ptr<InetAddress> new_peer);
 
  private:
@@ -266,14 +265,12 @@ class ZDTTransportLayer : public TransportLayer {
     bool unrel_started = false;
   };
 
-  // applies a MigratePeer request on the transport thread; a no-op otherwise
+  // applies a pending MigratePeer, on the transport thread
   void ApplyPendingPeer();
 
   std::shared_ptr<UDPSocket> socket_;
-  std::shared_ptr<InetAddress> peer_;  // touched only on the transport thread
-  // MigratePeer parks the new address here from any thread; ApplyPendingPeer
-  // moves it into peer_ on the transport thread. Guards only pending_peer_.
-  std::mutex migrate_mutex_;
+  std::shared_ptr<InetAddress> peer_;  // written only on the transport thread
+  std::mutex migrate_mutex_;           // guards pending_peer_
   std::shared_ptr<InetAddress> pending_peer_;
   ZDTOptions config_;
   bool drains_own_socket_;
