@@ -61,6 +61,15 @@ struct RendezvousServerConfig {
    *        Start(), which fails with InvalidAddress if it does not.
    */
   std::string relay_host;
+  /**
+   * @brief Reflectors advertised beside the embedded relay, each a znet relay
+   *        control endpoint (build with InetAddress::from). A second one on a
+   *        distinct IP is what lets a peer tell an endpoint-independent NAT
+   *        from a symmetric one; without it every gather reports Unknown. The
+   *        welcome advertises the relay first, then these, capped at
+   *        kMaxReflectors.
+   */
+  std::vector<std::shared_ptr<InetAddress>> extra_reflectors;
 };
 
 /**

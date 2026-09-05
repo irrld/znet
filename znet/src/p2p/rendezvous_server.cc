@@ -290,6 +290,15 @@ void RendezvousServer::Welcome(const std::shared_ptr<PeerSession>& session) {
     welcome->reflectors_.push_back(
         RelayEndpoint(relay_->address()->port()));
   }
+  // a distinct-IP second reflector is what makes the NAT-type verdict possible
+  for (const auto& reflector : config_.extra_reflectors) {
+    if (welcome->reflectors_.size() >= kMaxReflectors) {
+      break;
+    }
+    if (reflector && reflector->is_valid()) {
+      welcome->reflectors_.push_back(reflector);
+    }
+  }
   session->SendPacket(welcome);
 }
 
