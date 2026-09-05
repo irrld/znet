@@ -196,21 +196,24 @@ void PeerLocator::OnWelcome(const WelcomePacket& welcome) {
     reflectors.push_back(AtRendezvous(reflector));
   }
   host_.Gather(std::move(reflectors), config_.gather_timeout,
-               [this](Result result, std::vector<Candidate> candidates) {
-                 OnGathered(result, std::move(candidates));
+               [this](Host::GatherResult result) {
+                 OnGathered(std::move(result));
                });
 }
 
-void PeerLocator::OnGathered(Result result, std::vector<Candidate> candidates) {
-  if (result == Result::AlreadyStopped) {
-    FireFailed(PeerLocatorPhase::Gather, result, "");
+void PeerLocator::OnGathered(Host::GatherResult gathered) {
+  if (gathered.result == Result::AlreadyStopped) {
+    FireFailed(PeerLocatorPhase::Gather, gathered.result, "");
     return;
   }
-  if (result != Result::Success) {
+  if (gathered.result != Result::Success) {
     // the host candidates and the rendezvous's own observation still make a
     // punch worth trying
     ZNET_LOG_WARN("Gather: no reflector answered ({}); offering the local "
-                  "addresses only.", GetResultString(result));
+                  "addresses only.", GetResultString(gathered.result));
+  }
+  if (gathered.nat_type != NatType::Unknown) {
+    ZNET_LOG_INFO("Gather: NAT looks {}", GetNatTypeString(gathered.nat_type));
   }
   std::shared_ptr<PeerSession> session;
   std::string name;
@@ -220,19 +223,20 @@ void PeerLocator::OnGathered(Result result, std::vector<Candidate> candidates) {
     session = link_session_;
     name = peer_name_;
     observed = observed_;
+    nat_type_ = gathered.nat_type;
   }
   if (!session || !session->IsAlive()) {
     return;  // the link went away under the gather; the close event covers it
   }
   auto gathering = std::make_shared<GatheringPacket>();
   gathering->punch_port_ = host_.punch_port();
-  gathering->candidates_ = candidates;
+  gathering->candidates_ = gathered.candidates;
   session->SendPacket(gathering);
 
   // what peers will be told to punch: the reflexive mapping when one was
   // learned, else the rendezvous's view at the punch port
   std::shared_ptr<InetAddress> endpoint;
-  for (const auto& candidate : candidates) {
+  for (const auto& candidate : gathered.candidates) {
     if (candidate.type == CandidateType::Reflexive) {
       endpoint = candidate.address;
       break;
@@ -245,7 +249,7 @@ void PeerLocator::OnGathered(Result result, std::vector<Candidate> candidates) {
     std::lock_guard<std::mutex> lock(mutex_);
     is_ready_ = true;
   }
-  PeerLocatorReadyEvent event{name, endpoint};
+  PeerLocatorReadyEvent event{name, endpoint, gathered.nat_type};
   if (event_callback_) {
     event_callback_(event);
   }
@@ -266,9 +270,11 @@ void PeerLocator::OnPunchOffer(const PunchOfferPacket& pk) {
     return;
   }
   std::string self_name;
+  NatType nat_type;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     self_name = peer_name_;
+    nat_type = nat_type_;
   }
   const std::string target_peer = pk.target_peer_;
   const uint64_t punch_id = pk.punch_id_;
@@ -281,7 +287,11 @@ void PeerLocator::OnPunchOffer(const PunchOfferPacket& pk) {
   offer.punch_id = punch_id;
   offer.is_initiator = IsInitiator(punch_id, self_name, target_peer);
   offer.timeout = config_.punch_timeout;
-  offer.relay_delay = config_.relay_delay;
+  // a symmetric NAT will not answer a direct punch, so drop the head start and
+  // let the relay carry from the outset
+  offer.relay_delay = nat_type == NatType::AddressDependent
+                          ? std::chrono::milliseconds(0)
+                          : config_.relay_delay;
   host_.Punch(
       std::move(offer),
       [this, punch_id, self_name, target_peer](

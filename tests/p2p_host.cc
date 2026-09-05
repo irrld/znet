@@ -239,7 +239,7 @@ TEST(P2PHost, StopResolvesEveryRequestOrRefusesIt) {
       host.Punch(Offer({dead}, 4, true, std::chrono::seconds(30)),
                       [&](Result, std::shared_ptr<PeerSession>) { resolved++; });
       host.Gather({dead}, std::chrono::seconds(30),
-                  [&](Result, std::vector<p2p::Candidate>) { resolved++; });
+                  [&](p2p::Host::GatherResult) { resolved++; });
     }
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -256,8 +256,8 @@ TEST(P2PHost, StopResolvesEveryRequestOrRefusesIt) {
                     resolved++;
                   });
   host.Gather({}, std::chrono::seconds(1),
-              [&](Result r, std::vector<p2p::Candidate>) {
-                EXPECT_EQ(r, Result::AlreadyStopped);
+              [&](p2p::Host::GatherResult r) {
+                EXPECT_EQ(r.result, Result::AlreadyStopped);
                 resolved++;
               });
   EXPECT_EQ(resolved.load(), before + 2);

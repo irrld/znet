@@ -115,14 +115,16 @@ struct GatherOutcome {
   std::mutex mutex;
   Result result = Result::Failure;
   std::vector<p2p::Candidate> candidates;
+  p2p::NatType nat_type = p2p::NatType::Unknown;
   std::atomic<bool> done{false};
 
   p2p::Host::GatherCallback Callback() {
-    return [this](Result r, std::vector<p2p::Candidate> c) {
+    return [this](p2p::Host::GatherResult r) {
       {
         std::lock_guard<std::mutex> lock(mutex);
-        result = r;
-        candidates = std::move(c);
+        result = r.result;
+        candidates = std::move(r.candidates);
+        nat_type = r.nat_type;
       }
       done = true;
     };

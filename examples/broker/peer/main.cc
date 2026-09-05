@@ -146,11 +146,12 @@ int main(int argc, char* argv[]) {
   }
   std::promise<std::vector<p2p::Candidate>> gathering;
   host_->Gather(reflectors, std::chrono::seconds(2),
-                [&](Result gather_result, std::vector<p2p::Candidate> found) {
-                  if (gather_result != Result::Success) {
-                    ZNET_LOG_WARN("Gather: {}", GetResultString(gather_result));
+                [&](p2p::Host::GatherResult result) {
+                  if (result.result != Result::Success) {
+                    ZNET_LOG_WARN("Gather: {}",
+                                  GetResultString(result.result));
                   }
-                  gathering.set_value(std::move(found));
+                  gathering.set_value(std::move(result.candidates));
                 });
   gathered_ = gathering.get_future().get();
   for (const auto& candidate : gathered_) {

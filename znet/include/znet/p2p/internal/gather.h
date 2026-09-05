@@ -36,6 +36,41 @@ namespace internal {
  *         last, capped at kMaxCandidates. */
 std::vector<Candidate> LocalCandidates(PortNumber port);
 
+/** @brief The largest stride between two reflected ports still treated as a
+ *         sequential mapping; a wider gap is not predictable. */
+ZNET_INLINE_CONSTEXPR uint16_t kMaxPortStride = 64;
+
+/**
+ * @brief Predicts up to `count` further external ports for a symmetric NAT
+ *        that assigns them sequentially.
+ *
+ * Given the mappings the reflectors observed, when two share a host and their
+ * ports differ by a positive stride no wider than kMaxPortStride, the next
+ * ports are the highest seen plus the stride, repeated. Each is a Reflexive
+ * candidate the other peer can also punch. Empty when there is no such
+ * pattern, so it is safe to call on any gather.
+ */
+std::vector<Candidate> PredictedPorts(const std::vector<Candidate>& reflexive,
+                                      size_t count);
+
+/** @brief One reflector's report: the reflector queried and the public
+ *         mapping it saw for this socket. */
+struct Reflection {
+  std::shared_ptr<InetAddress> reflector;
+  std::shared_ptr<InetAddress> mapping;
+};
+
+/**
+ * @brief The NAT-type verdict from a set of reflections.
+ *
+ * The mapping seen through one reflector is compared against one seen through
+ * a reflector on a distinct host: agreeing is EndpointIndependent (one public
+ * port whatever the destination), differing is AddressDependent (a fresh port
+ * per destination, i.e. symmetric). Fewer than two distinct reflector hosts is
+ * Unknown; two on the same host cannot tell the two apart, so they are skipped.
+ */
+NatType ClassifyNat(const std::vector<Reflection>& reflections);
+
 /** @brief Whether any candidate names `address`. */
 inline bool ContainsAddress(const std::vector<Candidate>& candidates,
                             const InetAddress& address) {
@@ -84,12 +119,19 @@ class ReflectProbe {
     return reflexive_;
   }
 
+  /** @brief The verdict from two reflectors on distinct hosts: their mappings
+   *         agreeing is EndpointIndependent, differing is AddressDependent,
+   *         and fewer than two answering is Unknown. */
+  ZNET_NODISCARD NatType nat_type() const;
+
  private:
   struct Target {
     std::shared_ptr<InetAddress> reflector;
     uint64_t nonce = 0;
     bool answered = false;
     TimePoint last_sent{};
+    // what this reflector reported this socket's public mapping as
+    std::shared_ptr<InetAddress> observed;
   };
 
   std::vector<Target> targets_;

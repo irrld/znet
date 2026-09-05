@@ -59,6 +59,35 @@ inline std::string GetCandidateTypeString(CandidateType type) {
 }
 
 /**
+ * @brief What two reflectors on distinct IPs reveal about the local NAT, which
+ *        is how far a direct punch is likely to reach.
+ */
+enum class NatType : uint8_t {
+  /** @brief Fewer than two distinct reflectors answered, so the mapping cannot
+   *         be classified. */
+  Unknown = 0,
+  /** @brief Both reflectors saw the same mapping: one public port whatever the
+   *         destination, so a punch reaches it. */
+  EndpointIndependent = 1,
+  /** @brief The reflectors saw different mappings: a fresh port per
+   *         destination (symmetric), so a direct punch usually cannot and the
+   *         relay is the way. */
+  AddressDependent = 2,
+};
+
+inline std::string GetNatTypeString(NatType type) {
+  switch (type) {
+    case NatType::EndpointIndependent:
+      return "EndpointIndependent";
+    case NatType::AddressDependent:
+      return "AddressDependent";
+    case NatType::Unknown:
+    default:
+      return "Unknown";
+  }
+}
+
+/**
  * @brief One address a peer can be reached at, and what kind it is.
  *
  * Gathering produces Host and Reflexive candidates from a socket

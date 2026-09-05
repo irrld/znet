@@ -14,6 +14,8 @@
 #include "znet/logger.h"
 #include "znet/p2p/internal/zdt_punch.h"
 
+#include <algorithm>
+
 namespace znet {
 namespace p2p {
 namespace internal {
@@ -40,6 +42,48 @@ std::vector<Candidate> LocalCandidates(PortNumber port) {
     }
   }
   return candidates;
+}
+
+std::vector<Candidate> PredictedPorts(const std::vector<Candidate>& reflexive,
+                                      size_t count) {
+  std::vector<Candidate> out;
+  // gather the ports of every reflexive mapping that shares one external host;
+  // a symmetric NAT keeps the IP and advances only the port
+  std::shared_ptr<InetAddress> host;
+  std::vector<int> ports;
+  for (const auto& candidate : reflexive) {
+    if (candidate.type != CandidateType::Reflexive || !candidate.address) {
+      continue;
+    }
+    if (!host) {
+      host = candidate.address;
+    } else if (host->host_key() != candidate.address->host_key()) {
+      continue;  // a different external IP is not part of this sequence
+    }
+    ports.push_back(static_cast<int>(candidate.address->port()));
+  }
+  if (!host || ports.size() < 2) {
+    return out;
+  }
+  std::sort(ports.begin(), ports.end());
+  const int stride = ports.back() - ports[ports.size() - 2];
+  if (stride <= 0 || stride > kMaxPortStride) {
+    return out;  // not a sequential mapping we can extend
+  }
+  int next = ports.back();
+  for (size_t i = 0; i < count; i++) {
+    next += stride;
+    if (next > 65535) {
+      break;
+    }
+    Candidate candidate;
+    candidate.type = CandidateType::Reflexive;
+    candidate.address = host->WithPort(static_cast<PortNumber>(next));
+    if (candidate.address) {
+      out.push_back(std::move(candidate));
+    }
+  }
+  return out;
 }
 
 ReflectProbe::ReflectProbe(std::vector<std::shared_ptr<InetAddress>> reflectors,
@@ -88,7 +132,7 @@ void ReflectProbe::OnDatagram(const InetAddress& from, const uint8_t* data,
     return;
   }
   const uint64_t nonce = in.ReadInt<uint64_t>();
-  auto observed = in.ReadInetAddress();
+  std::shared_ptr<InetAddress> observed = in.ReadInetAddress();
   if (!observed || !observed->is_valid()) {
     return;
   }
@@ -97,6 +141,7 @@ void ReflectProbe::OnDatagram(const InetAddress& from, const uint8_t* data,
       continue;
     }
     target.answered = true;
+    target.observed = observed;  // kept per target for the NAT-type verdict
     if (!ContainsAddress(reflexive_, *observed)) {
       ZNET_LOG_INFO("Gather: {} sees this socket at {}", from.readable(),
                     observed->readable());
@@ -124,6 +169,36 @@ bool ReflectProbe::Done(TimePoint now) const {
 Result ReflectProbe::result() const {
   return targets_.empty() || !reflexive_.empty() ? Result::Success
                                                  : Result::Timeout;
+}
+
+NatType ClassifyNat(const std::vector<Reflection>& reflections) {
+  const Reflection* baseline = nullptr;
+  for (const auto& reflection : reflections) {
+    if (!reflection.reflector || !reflection.mapping) {
+      continue;
+    }
+    if (!baseline) {
+      baseline = &reflection;
+      continue;
+    }
+    if (baseline->reflector->host_key() == reflection.reflector->host_key()) {
+      continue;  // same reflector host tells us nothing new
+    }
+    return *baseline->mapping == *reflection.mapping
+               ? NatType::EndpointIndependent
+               : NatType::AddressDependent;
+  }
+  return NatType::Unknown;
+}
+
+NatType ReflectProbe::nat_type() const {
+  std::vector<Reflection> reflections;
+  for (const auto& target : targets_) {
+    if (target.answered && target.observed) {
+      reflections.push_back({target.reflector, target.observed});
+    }
+  }
+  return ClassifyNat(reflections);
 }
 
 }  // namespace internal

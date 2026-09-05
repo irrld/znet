@@ -50,6 +50,13 @@ p2p::HostConfig LoopbackHost() {
   return config;
 }
 
+p2p::Candidate Reflexive(const char* host, PortNumber port) {
+  p2p::Candidate candidate;
+  candidate.type = p2p::CandidateType::Reflexive;
+  candidate.address = InetAddress::from(host, port);
+  return candidate;
+}
+
 }  // namespace
 
 TEST(LocalCandidates, EveryAddressCarriesThePort) {
@@ -176,4 +183,109 @@ TEST(HostGather, GatheredCandidatesCarryAPunch) {
   a.Stop();
   b.Stop();
   relay->Stop();
+}
+
+TEST(HostGather, OneReflectorLeavesTheNatTypeUnknown) {
+  ASSERT_EQ(Init(), Result::Success);
+  auto relay = StartRelay();
+  p2p::Host host{LoopbackHost()};
+  ASSERT_EQ(host.Start(), Result::Success);
+
+  GatherOutcome outcome;
+  host.Gather({relay->address()}, std::chrono::seconds(2), outcome.Callback());
+  ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
+  EXPECT_EQ(outcome.result, Result::Success);
+  // one reflector cannot classify the mapping
+  EXPECT_EQ(outcome.nat_type, p2p::NatType::Unknown);
+  host.Stop();
+  relay->Stop();
+}
+
+// ClassifyNat is pure, so the verdicts a real gather cannot reach on loopback
+// (no NAT sits between, and a second loopback host is not bindable everywhere)
+// are covered here with fabricated reflections.
+namespace {
+p2p::internal::Reflection Report(const char* reflector, const char* mapping,
+                                 PortNumber mapped_port) {
+  p2p::internal::Reflection reflection;
+  reflection.reflector = InetAddress::from(reflector, 3478);
+  reflection.mapping = InetAddress::from(mapping, mapped_port);
+  return reflection;
+}
+}  // namespace
+
+TEST(ClassifyNat, DistinctReflectorsAgreeingIsEndpointIndependent) {
+  // two reflectors on distinct hosts see the same public mapping
+  EXPECT_EQ(p2p::internal::ClassifyNat(
+                {Report("198.51.100.1", "203.0.113.7", 55000),
+                 Report("198.51.100.2", "203.0.113.7", 55000)}),
+            p2p::NatType::EndpointIndependent);
+}
+
+TEST(ClassifyNat, DistinctReflectorsDifferingIsAddressDependent) {
+  // a fresh port per destination is a symmetric NAT
+  EXPECT_EQ(p2p::internal::ClassifyNat(
+                {Report("198.51.100.1", "203.0.113.7", 55000),
+                 Report("198.51.100.2", "203.0.113.7", 55001)}),
+            p2p::NatType::AddressDependent);
+}
+
+TEST(ClassifyNat, InsufficientReflectorsAreUnknown) {
+  // one reflector cannot classify
+  EXPECT_EQ(p2p::internal::ClassifyNat({Report("198.51.100.1", "203.0.113.7",
+                                               55000)}),
+            p2p::NatType::Unknown);
+  // two on the same host cannot tell endpoint-independent from address-dependent
+  EXPECT_EQ(p2p::internal::ClassifyNat(
+                {Report("198.51.100.1", "203.0.113.7", 55000),
+                 Report("198.51.100.1", "203.0.113.7", 55001)}),
+            p2p::NatType::Unknown);
+}
+
+// PredictedPorts is pure, so the symmetric case that needs real hardware to
+// gather can still be covered here.
+TEST(PredictedPorts, ExtendsASequentialMapping) {
+  // two mappings on one host, stride 3
+  const auto out = p2p::internal::PredictedPorts(
+      {Reflexive("203.0.113.7", 4000), Reflexive("203.0.113.7", 4003)}, 4);
+  ASSERT_EQ(out.size(), 4u);
+  EXPECT_EQ(out[0].address->port(), 4006);
+  EXPECT_EQ(out[3].address->port(), 4015);
+  for (const auto& c : out) {
+    EXPECT_EQ(c.type, p2p::CandidateType::Reflexive);
+    EXPECT_EQ(c.address->readable().substr(0, 9), "203.0.113");
+  }
+}
+
+TEST(PredictedPorts, RefusesWhatItCannotExtend) {
+  // a single mapping: nothing to measure a stride from
+  EXPECT_TRUE(p2p::internal::PredictedPorts({Reflexive("203.0.113.7", 4000)}, 4)
+                  .empty());
+  // two different hosts: not one NAT's sequence
+  EXPECT_TRUE(p2p::internal::PredictedPorts(
+                  {Reflexive("203.0.113.7", 4000),
+                   Reflexive("203.0.113.8", 4001)},
+                  4)
+                  .empty());
+  // same port twice: stride 0
+  EXPECT_TRUE(p2p::internal::PredictedPorts(
+                  {Reflexive("203.0.113.7", 4000),
+                   Reflexive("203.0.113.7", 4000)},
+                  4)
+                  .empty());
+  // a gap too wide to be a sequential allocation
+  EXPECT_TRUE(p2p::internal::PredictedPorts(
+                  {Reflexive("203.0.113.7", 4000),
+                   Reflexive("203.0.113.7", 40000)},
+                  4)
+                  .empty());
+}
+
+TEST(PredictedPorts, ClampsAtThePortCeiling) {
+  // stride 5 from 65525: 65530 and 65535 fit, 65540 does not
+  const auto out = p2p::internal::PredictedPorts(
+      {Reflexive("203.0.113.7", 65520), Reflexive("203.0.113.7", 65525)}, 8);
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_EQ(out[0].address->port(), 65530);
+  EXPECT_EQ(out[1].address->port(), 65535);
 }

@@ -100,7 +100,7 @@ class PeerLocator {
   bool OnDisconnectEvent(ClientDisconnectedFromServerEvent& event);
   bool OnConnectionFailedEvent(ClientConnectionFailedEvent& event);
   void OnWelcome(const WelcomePacket& welcome);
-  void OnGathered(Result result, std::vector<Candidate> candidates);
+  void OnGathered(Host::GatherResult result);
   void OnPeerNotFound(const std::string& target_peer);
   void OnPunchOffer(const PunchOfferPacket& offer);
   // an unspecified host on the wire means the rendezvous host itself
@@ -117,6 +117,9 @@ class PeerLocator {
   std::string peer_name_;
   std::shared_ptr<InetAddress> observed_;
   std::shared_ptr<PeerSession> link_session_;
+  // this peer's own NAT-type verdict from its last gather; a symmetric one
+  // sends every punch straight to the relay
+  NatType nat_type_ = NatType::Unknown;
   bool is_running_ = false;
   bool is_ready_ = false;
 };

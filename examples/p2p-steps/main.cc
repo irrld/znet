@@ -82,11 +82,16 @@ std::vector<p2p::Candidate> GatherSync(p2p::Host& host, const std::string& name,
   std::promise<std::vector<p2p::Candidate>> promise;
   auto future = promise.get_future();
   host.Gather({std::move(reflector)}, std::chrono::seconds(2),
-              [&](Result result, std::vector<p2p::Candidate> candidates) {
-                if (result != Result::Success) {
-                  ZNET_LOG_WARN("{}: gather: {}", name, GetResultString(result));
+              [&](p2p::Host::GatherResult result) {
+                if (result.result != Result::Success) {
+                  ZNET_LOG_WARN("{}: gather: {}", name,
+                                GetResultString(result.result));
                 }
-                promise.set_value(std::move(candidates));
+                if (result.nat_type != p2p::NatType::Unknown) {
+                  ZNET_LOG_INFO("{}: NAT looks {}", name,
+                                p2p::GetNatTypeString(result.nat_type));
+                }
+                promise.set_value(std::move(result.candidates));
               });
   std::vector<p2p::Candidate> candidates = future.get();
   for (const auto& candidate : candidates) {

@@ -25,6 +25,11 @@ namespace p2p {
 using namespace backends;
 using clock = std::chrono::steady_clock;
 
+namespace {
+// how many ports ahead to guess for a sequential symmetric NAT
+ZNET_INLINE_CONSTEXPR size_t kPredictedPortCount = 8;
+}  // namespace
+
 Host::Host(const HostConfig& config) : config_(config) {}
 
 Host::~Host() {
@@ -83,7 +88,7 @@ void Host::Stop() {
   }
   for (auto& gathering : gathers_) {
     if (gathering.on_done) {
-      gathering.on_done(Result::AlreadyStopped, {});
+      gathering.on_done({Result::AlreadyStopped, {}, NatType::Unknown});
     }
   }
   gathers_.clear();
@@ -118,7 +123,7 @@ void Host::Gather(std::vector<std::shared_ptr<InetAddress>> reflectors,
   if (!running_.load()) {
     lock.unlock();
     if (gathering.on_done) {
-      gathering.on_done(Result::AlreadyStopped, {});
+      gathering.on_done({Result::AlreadyStopped, {}, NatType::Unknown});
     }
     return;
   }
@@ -238,22 +243,42 @@ bool Host::TickGathers() {
       i++;
       continue;
     }
-    // reflexive first: the broker's best candidate, and what it dedups the
-    // host ones against
-    std::vector<Candidate> candidates = gathering.probe->reflexive();
-    for (auto& host : internal::LocalCandidates(punch_port())) {
-      if (!internal::ContainsAddress(candidates, *host.address)) {
-        candidates.push_back(std::move(host));
-      }
-    }
     Gathering done = std::move(gathers_[i]);
     gathers_.erase(gathers_.begin() + static_cast<long>(i));
     if (done.on_done) {
-      done.on_done(done.probe->result(), std::move(candidates));
+      done.on_done(CollectGather(*done.probe));
     }
     any = true;
   }
   return any;
+}
+
+Host::GatherResult Host::CollectGather(
+    const internal::ReflectProbe& probe) const {
+  GatherResult result;
+  result.result = probe.result();
+  result.nat_type = probe.nat_type();
+  // reflexive first: the broker's best candidate, and what the host ones dedup
+  // against
+  result.candidates = probe.reflexive();
+  auto add_new = [&result](Candidate candidate) {
+    if (result.candidates.size() < kMaxCandidates &&
+        !internal::ContainsAddress(result.candidates, *candidate.address)) {
+      result.candidates.push_back(std::move(candidate));
+    }
+  };
+  for (auto& host : internal::LocalCandidates(punch_port())) {
+    add_new(std::move(host));
+  }
+  // a symmetric NAT will not answer a plain punch, but if its mapping advances
+  // sequentially the next ports are guessable, so offer those too
+  if (result.nat_type == NatType::AddressDependent) {
+    for (auto& predicted :
+         internal::PredictedPorts(probe.reflexive(), kPredictedPortCount)) {
+      add_new(std::move(predicted));
+    }
+  }
+  return result;
 }
 
 bool Host::TickPunches() {

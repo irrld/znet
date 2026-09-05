@@ -78,16 +78,24 @@ class Host {
       std::function<void(Result, std::shared_ptr<PeerSession>)>;
 
   /**
-   * @brief Runs on the host's thread when a gather resolves, with the
-   *        candidates to hand the broker: reflexive first, then host.
+   * @brief What a gather resolved to: the outcome, the candidates to hand the
+   *        broker (reflexive first, then host), and the NAT-type verdict the
+   *        reflectors revealed.
    *
-   * Success once any reflector answered, or none were asked; Timeout when
-   * every reflector stayed silent, with the host candidates still delivered
-   * since they are worth offering on their own; AlreadyStopped with nothing
-   * if the host was stopped underneath.
+   * result is Success once any reflector answered, or none were asked; Timeout
+   * when every reflector stayed silent, with the host candidates still filled
+   * since they are worth offering on their own; AlreadyStopped with nothing if
+   * the host was stopped underneath. nat_type needs two distinct reflectors to
+   * be anything but Unknown.
    */
-  using GatherCallback =
-      std::function<void(Result, std::vector<Candidate>)>;
+  struct GatherResult {
+    Result result = Result::Success;
+    std::vector<Candidate> candidates;
+    NatType nat_type = NatType::Unknown;
+  };
+
+  /** @brief Runs on the host's thread when a gather resolves. */
+  using GatherCallback = std::function<void(GatherResult)>;
 
   explicit Host(const HostConfig& config);
   ~Host();
@@ -172,6 +180,9 @@ class Host {
   bool TickGathers();
   bool TickPunches();
   bool ProcessSessions();
+  // the offer a finished gather produces: its verdict, the reflexive mappings,
+  // this socket's own networks, and, for a symmetric NAT, its predicted ports
+  GatherResult CollectGather(const internal::ReflectProbe& probe) const;
   // what routes_ is keyed by: the peer's address, plus the relay channel for
   // a relayed session, since every relayed peer shares the relay's address
   static std::string RouteKey(const InetAddress& address, uint32_t channel);

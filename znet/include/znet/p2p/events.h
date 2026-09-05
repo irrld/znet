@@ -15,6 +15,7 @@
 #include "znet/compat.h"
 #include "znet/event.h"
 #include "znet/inet_addr.h"
+#include "znet/p2p/punch.h"
 #include "znet/peer_session.h"
 
 #include <memory>
@@ -52,8 +53,11 @@ inline std::string GetPeerLocatorPhaseString(PeerLocatorPhase phase) {
 class PeerLocatorReadyEvent : public Event {
  public:
   PeerLocatorReadyEvent(std::string peer_name,
-                        std::shared_ptr<InetAddress> endpoint)
-      : peer_name_(std::move(peer_name)), endpoint_(std::move(endpoint)) {}
+                        std::shared_ptr<InetAddress> endpoint,
+                        NatType nat_type = NatType::Unknown)
+      : peer_name_(std::move(peer_name)),
+        endpoint_(std::move(endpoint)),
+        nat_type_(nat_type) {}
 
   ZNET_NODISCARD const std::string& peer_name() const { return peer_name_; }
 
@@ -63,11 +67,16 @@ class PeerLocatorReadyEvent : public Event {
     return endpoint_;
   }
 
+  /** @brief The NAT-type verdict from gathering; Unknown without two distinct
+   *         reflectors. */
+  ZNET_NODISCARD NatType nat_type() const { return nat_type_; }
+
   ZNET_EVENT_CLASS_TYPE(PeerLocatorReadyEvent)
   ZNET_EVENT_CLASS_CATEGORY(EventCategoryP2P)
  private:
   std::string peer_name_;
   std::shared_ptr<InetAddress> endpoint_;
+  NatType nat_type_;
 };
 
 class PeerLocatorCloseEvent : public Event {
