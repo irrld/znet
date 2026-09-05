@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <set>
 #include <thread>
 #include <tuple>
@@ -82,6 +83,12 @@ class ZDTTransportLayer : public TransportLayer {
 
   std::shared_ptr<InetAddress> peer() const { return peer_; }
   std::shared_ptr<ZDTInbox> inbox() const { return inbox_; }
+
+  // Retargets the send path to `new_peer` after path validation confirmed the
+  // peer moved there. Thread-safe: the caller may be any thread, but the swap
+  // itself is applied on this transport's own thread at the next tick, so peer_
+  // stays single-threaded and the send path never reads a torn pointer.
+  void MigratePeer(std::shared_ptr<InetAddress> new_peer);
 
  private:
   using TimePoint = std::chrono::steady_clock::time_point;
@@ -259,8 +266,15 @@ class ZDTTransportLayer : public TransportLayer {
     bool unrel_started = false;
   };
 
+  // applies a MigratePeer request on the transport thread; a no-op otherwise
+  void ApplyPendingPeer();
+
   std::shared_ptr<UDPSocket> socket_;
-  std::shared_ptr<InetAddress> peer_;
+  std::shared_ptr<InetAddress> peer_;  // touched only on the transport thread
+  // MigratePeer parks the new address here from any thread; ApplyPendingPeer
+  // moves it into peer_ on the transport thread. Guards only pending_peer_.
+  std::mutex migrate_mutex_;
+  std::shared_ptr<InetAddress> pending_peer_;
   ZDTOptions config_;
   bool drains_own_socket_;
   std::shared_ptr<ZDTInbox> inbox_;

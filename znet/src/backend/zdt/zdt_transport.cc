@@ -864,11 +864,35 @@ void ZDTTransportLayer::CheckTimers() {
   }
 }
 
+void ZDTTransportLayer::MigratePeer(std::shared_ptr<InetAddress> new_peer) {
+  if (!new_peer) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(migrate_mutex_);
+  pending_peer_ = std::move(new_peer);
+}
+
+void ZDTTransportLayer::ApplyPendingPeer() {
+  std::shared_ptr<InetAddress> next;
+  {
+    std::lock_guard<std::mutex> lock(migrate_mutex_);
+    if (!pending_peer_) {
+      return;
+    }
+    next = std::move(pending_peer_);
+    pending_peer_.reset();
+  }
+  ZNET_LOG_DEBUG("ZDT: send path migrating from {} to {}",
+                 peer_ ? peer_->readable() : "?", next->readable());
+  peer_ = std::move(next);
+}
+
 void ZDTTransportLayer::Update() {
   ZNET_ZDT_ENTER_DOMAIN(worker_domain_);
   if (is_closed_) {
     return;
   }
+  ApplyPendingPeer();
   if (drains_own_socket_) {
     DrainSocket();
   }

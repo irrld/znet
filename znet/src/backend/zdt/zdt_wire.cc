@@ -146,6 +146,23 @@ bool PeekOfflineHeader(const uint8_t* data, size_t len, ZDTOfflineMsg& out_id) {
   return true;
 }
 
+Buffer WritePathMessage(ZDTOfflineMsg id, const ZDTPathMessage& msg) {
+  Buffer out(Endianness::BigEndian);
+  WriteOfflineHeader(out, id);
+  out.WriteInt<uint64_t>(msg.cid);
+  out.WriteInt<uint64_t>(msg.nonce);
+  return out;
+}
+
+bool ReadPathMessage(Buffer& buffer, ZDTPathMessage& out) {
+  if (buffer.readable_bytes() < 2 * sizeof(uint64_t)) {
+    return false;
+  }
+  out.cid = buffer.ReadInt<uint64_t>();
+  out.nonce = buffer.ReadInt<uint64_t>();
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Return-routability cookie
 // ---------------------------------------------------------------------------

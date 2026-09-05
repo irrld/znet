@@ -297,6 +297,31 @@ inline bool ReadRelayHeader(const uint8_t* data, size_t len,
   return out_channel != 0;
 }
 
+// The connection id an online datagram carries, read straight off the bytes.
+// False when the flags do not set kFlagHasCid or the datagram is too short to
+// hold one. Lets the server route a migrated datagram before parsing the rest.
+inline bool PeekCid(const uint8_t* data, size_t len, uint64_t& out_cid) {
+  if (len < 1 + kZDTCidSize || !(data[0] & kFlagHasCid)) {
+    return false;
+  }
+  out_cid = ReadBigEndian64(data + 1);
+  return true;
+}
+
+// PathChallenge and PathResponse share a shape: the connection id being moved
+// and a nonce that ties a response to its challenge.
+struct ZDTPathMessage {
+  uint64_t cid = 0;
+  uint64_t nonce = 0;
+};
+
+// Builds a PathChallenge or PathResponse datagram; `id` must be one of them.
+Buffer WritePathMessage(ZDTOfflineMsg id, const ZDTPathMessage& msg);
+
+// Reads the cid and nonce that follow an already-read offline header. False
+// when fewer than the two fields remain.
+bool ReadPathMessage(Buffer& buffer, ZDTPathMessage& out);
+
 // --- Return-routability cookie ------------------------------------------------
 // server issues HMAC(secret[epoch], addr, epoch) in Reply1 holding no state, and
 // only allocates a session once the client echoes it back in Request2.

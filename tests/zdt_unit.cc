@@ -91,6 +91,66 @@ TEST(ZDTHeaderCid, ShortDatagramWithTheFlagIsRejected) {
   EXPECT_FALSE(ReadZDTHeader(buffer, out));
 }
 
+// --- path validation wire -----------------------------------------------------
+
+// The server peeks the cid off a datagram from an unknown address to find the
+// session it belongs to, without parsing the rest.
+TEST(ZDTPeekCid, ReadsTheIdOffAnOnlineDatagram) {
+  ZDTHeader header;
+  header.flags = kFlagOnline | kFlagHasCid;
+  header.cid = 0xfeedfacecafebeefULL;
+  header.packet_seq = 9;
+  Buffer buffer(Endianness::BigEndian);
+  WriteZDTHeader(buffer, header);
+
+  uint64_t cid = 0;
+  ASSERT_TRUE(PeekCid(reinterpret_cast<const uint8_t*>(buffer.data()),
+                      buffer.size(), cid));
+  EXPECT_EQ(cid, header.cid);
+}
+
+TEST(ZDTPeekCid, RefusesADatagramWithoutTheFlag) {
+  ZDTHeader header;
+  header.flags = kFlagOnline;  // no cid stamped
+  header.packet_seq = 1;
+  Buffer buffer(Endianness::BigEndian);
+  WriteZDTHeader(buffer, header);
+  uint64_t cid = 0;
+  EXPECT_FALSE(PeekCid(reinterpret_cast<const uint8_t*>(buffer.data()),
+                       buffer.size(), cid));
+}
+
+TEST(ZDTPeekCid, RefusesADatagramTooShortForTheId) {
+  const uint8_t byte = kFlagOnline | kFlagHasCid;
+  uint64_t cid = 0;
+  EXPECT_FALSE(PeekCid(&byte, 1, cid));
+}
+
+TEST(ZDTPathMessage, RoundTrips) {
+  ZDTPathMessage msg;
+  msg.cid = 0x1122334455667788ULL;
+  msg.nonce = 0x99aabbccddeeff00ULL;
+  Buffer out = WritePathMessage(ZDTOfflineMsg::PathChallenge, msg);
+
+  ZDTOfflineMsg id;
+  ASSERT_TRUE(ReadOfflineHeader(out, id));
+  EXPECT_EQ(id, ZDTOfflineMsg::PathChallenge);
+  ZDTPathMessage parsed;
+  ASSERT_TRUE(ReadPathMessage(out, parsed));
+  EXPECT_EQ(parsed.cid, msg.cid);
+  EXPECT_EQ(parsed.nonce, msg.nonce);
+}
+
+TEST(ZDTPathMessage, RejectsATruncatedPayload) {
+  Buffer out(Endianness::BigEndian);
+  WriteOfflineHeader(out, ZDTOfflineMsg::PathResponse);
+  out.WriteInt<uint64_t>(1);  // cid only, the nonce is missing
+  ZDTOfflineMsg id;
+  ASSERT_TRUE(ReadOfflineHeader(out, id));
+  ZDTPathMessage parsed;
+  EXPECT_FALSE(ReadPathMessage(out, parsed));
+}
+
 // --- sequence comparison ------------------------------------------------------
 
 // These decide what counts as "newer" everywhere in the protocol, and they have
