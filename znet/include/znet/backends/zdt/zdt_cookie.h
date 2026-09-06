@@ -12,7 +12,7 @@
 // connection-migration challenge built on it. The handshake proves a client's
 // source address before the server allocates state (see zdt_backends.cc); a
 // migration proves a peer's new address before its route moves there. Both the
-// server backend and p2p::Host keep one secret and hold no per-challenge state.
+// server backend and p2p::Agent keep one secret and hold no per-challenge state.
 //
 // API stability: internal (see the wiki, API Stability)
 

@@ -9,8 +9,8 @@
 //
 // API stability: experimental (see the wiki, API Stability)
 
-#ifndef ZNET_P2P_HOST_H_
-#define ZNET_P2P_HOST_H_
+#ifndef ZNET_P2P_AGENT_H_
+#define ZNET_P2P_AGENT_H_
 
 #include "znet/inet_addr.h"
 #include "znet/p2p/punch.h"
@@ -40,8 +40,8 @@ class ZDTPunch;
 struct PunchOutcome;
 }  // namespace internal
 
-/** @brief What a Host binds and builds its sessions with. */
-struct HostConfig {
+/** @brief What an Agent binds and builds its sessions with. */
+struct AgentConfig {
   std::string bind_address = "0.0.0.0";
   /** @brief Zero picks an ephemeral port; read it back with punch_port(). */
   PortNumber bind_port = 0;
@@ -56,18 +56,18 @@ struct HostConfig {
  *
  * A NAT hands out one public mapping per local socket, so every peer must
  * be reached through the same socket, and the mapping has to be learned from
- * that socket too. The host owns it, runs the gather and punch state
+ * that socket too. The agent owns it, runs the gather and punch state
  * machines on it (asynchronously; neither call blocks), and drives the
  * resulting sessions on one thread the way a server worker does. ZDT only;
  * TCP has its own path in p2p/tcp/punch.h.
  *
- * See the wiki's Peer-to-Peer page for the full flow; tests/p2p_host.cc is a
+ * See the wiki's Peer-to-Peer page for the full flow; tests/p2p_agent.cc is a
  * working three-player mesh.
  */
-class Host {
+class Agent {
  public:
   /**
-   * @brief Runs on the host's thread when a punch resolves: Success with a
+   * @brief Runs on the agent's thread when a punch resolves: Success with a
    *        session that has finished its handshake and is ready, or a failure
    *        with null. Setting the session's codec and handler inside the
    *        callback is the intended pattern, exactly like a connected event.
@@ -86,7 +86,7 @@ class Host {
    * result is Success once any reflector answered, or none were asked; Timeout
    * when every reflector stayed silent, with the host candidates still filled
    * since they are worth offering on their own; AlreadyStopped with nothing if
-   * the host was stopped underneath. nat_type needs two distinct reflectors to
+   * the agent was stopped underneath. nat_type needs two distinct reflectors to
    * be anything but Unknown.
    */
   struct GatherResult {
@@ -95,12 +95,12 @@ class Host {
     NatType nat_type = NatType::Unknown;
   };
 
-  /** @brief Runs on the host's thread when a gather resolves. */
+  /** @brief Runs on the agent's thread when a gather resolves. */
   using GatherCallback = std::function<void(GatherResult)>;
 
-  explicit Host(const HostConfig& config);
-  ~Host();
-  Host(const Host&) = delete;
+  explicit Agent(const AgentConfig& config);
+  ~Agent();
+  Agent(const Agent&) = delete;
 
   /** @brief Opens and binds the socket and starts the tick thread. */
   Result Start();
@@ -143,12 +143,12 @@ class Host {
   /**
    * @brief Moves every punched session to a new local address, keeping them.
    *
-   * The host owns one socket for all peers, so a rebind moves them together:
+   * The agent owns one socket for all peers, so a rebind moves them together:
    * it binds a fresh socket and lets each peer re-path by the connection id
    * (the analog of Client::Rebind for the mesh). Needs
    * enable_connection_migration on both ends; direct sessions only, since a
    * relayed peer is reached through the relay's fixed address. Thread-safe: the
-   * swap is applied on the host's thread. Same local-address Result values as a
+   * swap is applied on the agent's thread. Same local-address Result values as a
    * bind.
    */
   Result Rebind(const std::string& ip, PortNumber port);
@@ -160,12 +160,12 @@ class Host {
   }
 
   ZNET_NODISCARD std::shared_ptr<InetAddress> local_address() const {
-    // Rebind() reassigns this from the host thread, so reads take the lock
+    // Rebind() reassigns this from the agent thread, so reads take the lock
     std::lock_guard<std::mutex> lock(address_mutex_);
     return local_address_;
   }
 
-  /** @brief Live punched sessions. Approximate off the host thread. */
+  /** @brief Live punched sessions. Approximate off the agent thread. */
   ZNET_NODISCARD size_t session_count() const {
     return session_count_.load(std::memory_order_relaxed);
   }
@@ -219,7 +219,7 @@ class Host {
   // split: a direct datagram from a new address carrying a known remote_guid is
   // a peer that moved, so challenge the path and re-key on a valid response;
   // a PathChallenge from a peer means we moved, so answer it. All gated on
-  // enable_connection_migration and on direct (unrelayed) sessions. Host thread.
+  // enable_connection_migration and on direct (unrelayed) sessions. Agent thread.
   // true when a live session claims this cid, so the datagram was a moved peer
   // and is dropped as unproven; false leaves it for HandleOffline (an in-flight
   // punch's first datagram also arrives cid-stamped and unrouted).
@@ -231,13 +231,13 @@ class Host {
   // swaps in a socket a Rebind() bound, retargeting every session's send path
   void ApplyPendingRebind();
 
-  HostConfig config_;
+  AgentConfig config_;
   std::shared_ptr<backends::UDPSocket> socket_;
   mutable std::mutex address_mutex_;  // guards local_address_ across a Rebind
   std::shared_ptr<InetAddress> local_address_;
   Task task_;
   std::atomic<bool> running_{false};
-  // signing secret for path-validation cookies (host thread only). Behind a
+  // signing secret for path-validation cookies (agent thread only). Behind a
   // pointer so this header stays clear of the ZDT backend definitions.
   std::unique_ptr<backends::CookieSecret> cookie_secret_;
 
@@ -258,4 +258,4 @@ class Host {
 }  // namespace znet
 
 
-#endif  // ZNET_P2P_HOST_H_
+#endif  // ZNET_P2P_AGENT_H_

@@ -27,7 +27,7 @@ ClientConfig MakeLinkConfig(const PeerLocatorConfig& config) {
 
 PeerLocator::PeerLocator(const PeerLocatorConfig& config)
     : config_(config),
-      host_(config.host),
+      agent_(config.agent),
       client_(MakeLinkConfig(config)) {
   client_.SetEventCallback(ZNET_BIND_FN(OnEvent));
 }
@@ -53,9 +53,9 @@ Result PeerLocator::Connect() {
         "PeerLocator: RelocateTrigger::Watch is not implemented yet; call "
         "Relocate() manually on a network change.");
   }
-  // the host may already be up from a previous stint on the rendezvous; the
+  // the agent may already be up from a previous stint on the rendezvous; the
   // mesh survives losing the link, so that is not an error
-  Result result = host_.Start();
+  Result result = agent_.Start();
   if (result != Result::Success && result != Result::AlreadyListening) {
     std::lock_guard<std::mutex> lock(mutex_);
     is_running_ = false;
@@ -76,7 +76,7 @@ Result PeerLocator::Connect() {
 
 Result PeerLocator::Disconnect() {
   Result result = client_.Disconnect();
-  host_.Stop();
+  agent_.Stop();
   std::lock_guard<std::mutex> lock(mutex_);
   is_running_ = false;
   is_ready_ = false;
@@ -136,8 +136,8 @@ void PeerLocator::BeginRepunch(std::vector<std::string> targets) {
     }
   }
   // re-gather; OnGathered re-sends the gathering and drains repunch_targets_
-  host_.Gather(std::move(reflectors), config_.gather_timeout,
-               [this](Host::GatherResult result) {
+  agent_.Gather(std::move(reflectors), config_.gather_timeout,
+               [this](Agent::GatherResult result) {
                  OnGathered(std::move(result));
                });
 }
@@ -246,13 +246,13 @@ void PeerLocator::OnWelcome(const WelcomePacket& welcome) {
     std::lock_guard<std::mutex> lock(mutex_);
     reflectors_ = reflectors;  // kept so Relocate can re-gather
   }
-  host_.Gather(std::move(reflectors), config_.gather_timeout,
-               [this](Host::GatherResult result) {
+  agent_.Gather(std::move(reflectors), config_.gather_timeout,
+               [this](Agent::GatherResult result) {
                  OnGathered(std::move(result));
                });
 }
 
-void PeerLocator::OnGathered(Host::GatherResult gathered) {
+void PeerLocator::OnGathered(Agent::GatherResult gathered) {
   if (gathered.result == Result::AlreadyStopped) {
     FireFailed(PeerLocatorPhase::Gather, gathered.result, "");
     return;
@@ -280,7 +280,7 @@ void PeerLocator::OnGathered(Host::GatherResult gathered) {
     return;  // the link went away under the gather; the close event covers it
   }
   auto gathering = std::make_shared<GatheringPacket>();
-  gathering->punch_port_ = host_.punch_port();
+  gathering->punch_port_ = agent_.punch_port();
   gathering->candidates_ = gathered.candidates;
   session->SendPacket(gathering);
 
@@ -307,7 +307,7 @@ void PeerLocator::OnGathered(Host::GatherResult gathered) {
     }
   }
   if (!endpoint && observed) {
-    endpoint = std::shared_ptr<InetAddress>(observed->WithPort(host_.punch_port()));
+    endpoint = std::shared_ptr<InetAddress>(observed->WithPort(agent_.punch_port()));
   }
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -356,7 +356,7 @@ void PeerLocator::OnPunchOffer(const PunchOfferPacket& pk) {
   offer.relay_delay = nat_type == NatType::AddressDependent
                           ? std::chrono::milliseconds(0)
                           : config_.relay_delay;
-  host_.Punch(
+  agent_.Punch(
       std::move(offer),
       [this, punch_id, self_name, target_peer](
           Result result, std::shared_ptr<PeerSession> session) {

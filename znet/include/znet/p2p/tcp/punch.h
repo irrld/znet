@@ -28,7 +28,7 @@ namespace tcp {
  * @brief TCP hole punch: a simultaneous open from both peers, retried for the
  *        whole budget, handed back ready.
  *
- * Deliberately apart from the ZDT path (p2p::Host and the locator over it):
+ * Deliberately apart from the ZDT path (p2p::Agent and the locator over it):
  * this is two players only, it punches from the very port the addresses were
  * exchanged on, and it has neither gathering nor a relay. Reach for it when
  * the connection has to be TCP; ZDT traverses more NATs.

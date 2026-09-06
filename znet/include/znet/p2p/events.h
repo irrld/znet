@@ -25,7 +25,7 @@ namespace znet {
 namespace p2p {
 
 // The events both locators fire, p2p::PeerLocator and tcp::PeerLocator, so a
-// TCP-only user does not have to compile the ZDT host to handle them.
+// TCP-only user does not have to compile the ZDT agent to handle them.
 
 /** @brief Which step of finding a peer failed. */
 enum class PeerLocatorPhase : uint8_t {
@@ -94,7 +94,7 @@ class PeerLocatorCloseEvent : public Event {
  * can simply be called again. A Punch failure costs that one peer. A Link
  * failure is a connection that could not be made, or a rendezvous of the
  * wrong kind, and PeerLocatorCloseEvent follows it; a link that dies later
- * fires the close event alone. A Gather failure means the host was stopped
+ * fires the close event alone. A Gather failure means the agent was stopped
  * underneath.
  */
 class PeerLocatorFailedEvent : public Event {

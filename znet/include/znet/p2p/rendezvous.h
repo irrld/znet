@@ -24,7 +24,7 @@ namespace p2p {
 // WelcomePacket      S -> C  protocol version, peer name, the endpoint S
 //                            observed, the reflectors to gather from, the
 //                            punch transport
-// GatheringPacket    C -> S  punch port and candidates (Host::Gather). May be
+// GatheringPacket    C -> S  punch port and candidates (Agent::Gather). May be
 //                            repeated; the latest replaces the rest
 // ConnectPeerPacket  C -> S  asks for a peer by name. An unknown name is
 //                            answered with PeerNotFoundPacket and not queued:

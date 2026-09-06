@@ -86,14 +86,14 @@ bool WaitUntil(Pred pred, int ms) {
   return pred();
 }
 
-// one Host::Punch outcome, collected thread-safely off the host's thread
+// one Agent::Punch outcome, collected thread-safely off the agent's thread
 struct PunchOutcome {
   std::mutex mutex;
   Result result = Result::Failure;
   std::shared_ptr<PeerSession> session;
   std::atomic<bool> done{false};
 
-  p2p::Host::PunchCallback Callback() {
+  p2p::Agent::PunchCallback Callback() {
     return [this](Result r, std::shared_ptr<PeerSession> s) {
       {
         std::lock_guard<std::mutex> lock(mutex);
@@ -110,7 +110,7 @@ struct PunchOutcome {
   }
 };
 
-// one Host::Gather outcome, the same way
+// one Agent::Gather outcome, the same way
 struct GatherOutcome {
   std::mutex mutex;
   Result result = Result::Failure;
@@ -118,8 +118,8 @@ struct GatherOutcome {
   p2p::NatType nat_type = p2p::NatType::Unknown;
   std::atomic<bool> done{false};
 
-  p2p::Host::GatherCallback Callback() {
-    return [this](p2p::Host::GatherResult r) {
+  p2p::Agent::GatherCallback Callback() {
+    return [this](p2p::Agent::GatherResult r) {
       {
         std::lock_guard<std::mutex> lock(mutex);
         result = r.result;
@@ -145,8 +145,8 @@ struct GatherOutcome {
 };
 
 // one locator plus everything its events reported, collected thread-safely.
-// Events fire on the link's thread (failed, close), and on the host tick for
-// the Host-based locator (ready, connected) or a worker for the TCP one.
+// Events fire on the link's thread (failed, close), and on the agent tick for
+// the Agent-based locator (ready, connected) or a worker for the TCP one.
 template <typename Locator, typename Config>
 struct LocatorProbeOf {
   Locator locator;
@@ -237,17 +237,17 @@ struct LocatorProbeOf {
   }
 };
 
-// the ZDT locator over a Host, punching from a loopback socket
-struct HostLocatorProbe
+// the ZDT locator over an Agent, punching from a loopback socket
+struct AgentLocatorProbe
     : LocatorProbeOf<p2p::PeerLocator, p2p::PeerLocatorConfig> {
   static p2p::PeerLocatorConfig ConfigFor(PortNumber rendezvous_port) {
     p2p::PeerLocatorConfig config;
     config.server_address = "127.0.0.1";
     config.server_port = rendezvous_port;
-    config.host.bind_address = "127.0.0.1";
+    config.agent.bind_address = "127.0.0.1";
     return config;
   }
-  explicit HostLocatorProbe(PortNumber rendezvous_port)
+  explicit AgentLocatorProbe(PortNumber rendezvous_port)
       : LocatorProbeOf(ConfigFor(rendezvous_port)) {}
 };
 

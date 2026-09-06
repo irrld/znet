@@ -91,7 +91,7 @@ inline std::string GetNatTypeString(NatType type) {
  * @brief One address a peer can be reached at, and what kind it is.
  *
  * Gathering produces Host and Reflexive candidates from a socket
- * (Host::Gather); a broker adds the Relayed one. Candidates travel as a
+ * (Agent::Gather); a broker adds the Relayed one. Candidates travel as a
  * list and the punch races every one of them.
  */
 struct Candidate {

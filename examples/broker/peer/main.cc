@@ -18,7 +18,7 @@
 #include "znet/client_events.h"
 #include "znet/codec.h"
 #include "znet/init.h"
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 #include "znet/p2p/punch.h"
 #include "znet/packet_handler.h"
 #include "znet/peer_session.h"
@@ -32,7 +32,7 @@
 #include <thread>
 
 std::string name_;
-std::unique_ptr<p2p::Host> host_;
+std::unique_ptr<p2p::Agent> agent_;
 std::vector<p2p::Candidate> gathered_;
 std::mutex mutex_;
 std::shared_ptr<PeerSession> peer_;  // the punched session, once ready
@@ -58,9 +58,9 @@ class OfferHandler : public PacketHandler<OfferHandler, OfferPacket> {
     offer.candidates = pk.candidates;
     offer.punch_id = pk.punch_id;
     offer.is_initiator = p2p::IsInitiator(pk.punch_id, name_, pk.peer_name);
-    host_->Punch(std::move(offer), [](Result result,
+    agent_->Punch(std::move(offer), [](Result result,
                                        std::shared_ptr<PeerSession> session) {
-      // on the host's thread, with a session whose handshake is done
+      // on the agent's thread, with a session whose handshake is done
       if (result != Result::Success) {
         ZNET_LOG_ERROR("Punch failed: {}", GetResultString(result));
         settled_ = true;
@@ -134,10 +134,10 @@ int main(int argc, char* argv[]) {
 
   // Step 1: the punch socket, and what it can be reached at. The relay is
   // the reflector; without one only the host candidates come back.
-  p2p::HostConfig host_config;
-  host_.reset(new p2p::Host(host_config));
-  if ((result = host_->Start()) != Result::Success) {
-    ZNET_LOG_ERROR("Host failed to start: {}", GetResultString(result));
+  p2p::AgentConfig agent_config;
+  agent_ = std::make_unique<p2p::Agent>(agent_config);
+  if ((result = agent_->Start()) != Result::Success) {
+    ZNET_LOG_ERROR("Agent failed to start: {}", GetResultString(result));
     return 1;
   }
   std::vector<std::shared_ptr<InetAddress>> reflectors;
@@ -145,8 +145,8 @@ int main(int argc, char* argv[]) {
     reflectors.push_back(InetAddress::from(broker, relay_port));
   }
   std::promise<std::vector<p2p::Candidate>> gathering;
-  host_->Gather(reflectors, std::chrono::seconds(2),
-                [&](p2p::Host::GatherResult result) {
+  agent_->Gather(reflectors, std::chrono::seconds(2),
+                [&](p2p::Agent::GatherResult result) {
                   if (result.result != Result::Success) {
                     ZNET_LOG_WARN("Gather: {}",
                                   GetResultString(result.result));
@@ -183,14 +183,14 @@ int main(int argc, char* argv[]) {
     peer = peer_;
   }
   if (!peer) {
-    host_->Stop();
+    agent_->Stop();
     return 1;
   }
   for (int i = 0; i < 100 && !note_received_; i++) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   peer->Close();
-  host_->Stop();
+  agent_->Stop();
   Cleanup();
   return note_received_ ? 0 : 1;
 }

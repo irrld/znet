@@ -11,7 +11,7 @@
 
 //
 // The ZDT hole-punch state machine, driven from outside by whoever owns the
-// socket (p2p::Host). Internal: usable directly, no stability promise.
+// socket (p2p::Agent). Internal: usable directly, no stability promise.
 //
 
 #ifndef ZNET_P2P_INTERNAL_ZDT_PUNCH_H_
@@ -105,7 +105,7 @@ class ZDTPunch {
  public:
   using TimePoint = std::chrono::steady_clock::time_point;
 
-  // local_migration: whether this host offers connection migration. The peer's
+  // local_migration: whether this agent offers connection migration. The peer's
   // offer arrives in the handshake, and the connection enables it only if both
   // asked.
   ZDTPunch(PunchOffer offer, TimePoint now, bool local_migration);

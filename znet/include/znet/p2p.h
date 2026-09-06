@@ -13,7 +13,7 @@
 #define ZNET_P2P_H_
 
 #include "znet/p2p/events.h"
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 #include "znet/p2p/locator.h"
 #include "znet/p2p/punch.h"
 #include "znet/p2p/relay_server.h"

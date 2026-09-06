@@ -9,13 +9,13 @@
 //
 
 //
-// The shared-socket P2P host: asynchronous punches, several peers on one
+// The shared-socket P2P agent: asynchronous punches, several peers on one
 // socket, and the full mesh flow through an in-process rendezvous.
 //
 
 #include "p2p_probes.h"
 #include "znet/init.h"
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 #include "znet/p2p/locator.h"
 #include "znet/p2p/punch.h"
 #include "znet/p2p/rendezvous_server.h"
@@ -40,8 +40,8 @@ namespace {
 using znet::test::PunchOutcome;
 using znet::test::WaitUntil;
 
-std::shared_ptr<InetAddress> HostAddr(const p2p::Host& host) {
-  return InetAddress::from("127.0.0.1", host.punch_port());
+std::shared_ptr<InetAddress> HostAddr(const p2p::Agent& agent) {
+  return InetAddress::from("127.0.0.1", agent.punch_port());
 }
 
 // an offer naming the peer at every address given, as a broker would
@@ -73,12 +73,12 @@ bool BothReady(PunchOutcome& a, PunchOutcome& b) {
 
 }  // namespace
 
-TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
+TEST(P2PAgent, PunchesAsynchronouslyAndExchangesMessages) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::HostConfig config;
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
-  p2p::Host a{config};
-  p2p::Host b{config};
+  p2p::Agent a{config};
+  p2p::Agent b{config};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -116,16 +116,16 @@ TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
   b.Stop();
 }
 
-// a host owns one socket for every peer, so rebinding it moves them together:
+// an agent owns one socket for every peer, so rebinding it moves them together:
 // the peer re-paths each session by its connection id as the datagrams start
 // arriving from the new address.
-TEST(P2PHost, MigratesASessionWhenTheHostRebinds) {
+TEST(P2PAgent, MigratesASessionWhenTheAgentRebinds) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::HostConfig config;
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
   config.session_options.zdt.enable_connection_migration = true;
-  p2p::Host a{config};
-  p2p::Host b{config};
+  p2p::Agent a{config};
+  p2p::Agent b{config};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -163,7 +163,7 @@ TEST(P2PHost, MigratesASessionWhenTheHostRebinds) {
   after->text = "after";
   ASSERT_EQ(at_a.Session()->SendPacket(after), Result::Success);
   ASSERT_TRUE(WaitUntil([&]() { return collector->count.load() == 2; }, 8000))
-      << "the session did not survive the host rebind";
+      << "the session did not survive the agent rebind";
   {
     std::lock_guard<std::mutex> lock(collector->mutex);
     EXPECT_EQ(collector->notes[1], "after");
@@ -176,12 +176,12 @@ TEST(P2PHost, MigratesASessionWhenTheHostRebinds) {
 // the responder may speak from inside its ready callback, and that lands on
 // the initiator in the very pass that made it ready, before its own callback
 // installed anything: the transport keeps it until then
-TEST(P2PHost, WhatThePeerSendsFirstWaitsForTheHandler) {
+TEST(P2PAgent, WhatThePeerSendsFirstWaitsForTheHandler) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::HostConfig config;
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
-  p2p::Host a{config};
-  p2p::Host b{config};
+  p2p::Agent a{config};
+  p2p::Agent b{config};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -217,13 +217,13 @@ TEST(P2PHost, WhatThePeerSendsFirstWaitsForTheHandler) {
   b.Stop();
 }
 
-TEST(P2PHost, ThreePeersShareOneSocketEach) {
+TEST(P2PAgent, ThreePeersShareOneSocketEach) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::HostConfig config;
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
-  p2p::Host a{config};
-  p2p::Host b{config};
-  p2p::Host c{config};
+  p2p::Agent a{config};
+  p2p::Agent b{config};
+  p2p::Agent c{config};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
   ASSERT_EQ(c.Start(), Result::Success);
@@ -279,73 +279,73 @@ TEST(P2PHost, ThreePeersShareOneSocketEach) {
   c.Stop();
 }
 
-// a callback handed to a host that is stopping must still be resolved:
+// a callback handed to an agent that is stopping must still be resolved:
 // Stop() drains what was queued and refuses what comes after, with no gap
 // in between for a request to fall through
-TEST(P2PHost, StopResolvesEveryRequestOrRefusesIt) {
+TEST(P2PAgent, StopResolvesEveryRequestOrRefusesIt) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::HostConfig config;
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
-  p2p::Host host{config};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{config};
+  ASSERT_EQ(agent.Start(), Result::Success);
   std::atomic<int> resolved{0};
   std::atomic<bool> stop{false};
   std::thread caller([&]() {
     std::shared_ptr<InetAddress> dead = InetAddress::from("203.0.113.1", 9);
     while (!stop.load()) {
-      host.Punch(Offer({dead}, 4, true, std::chrono::seconds(30)),
+      agent.Punch(Offer({dead}, 4, true, std::chrono::seconds(30)),
                       [&](Result, std::shared_ptr<PeerSession>) { resolved++; });
-      host.Gather({dead}, std::chrono::seconds(30),
-                  [&](p2p::Host::GatherResult) { resolved++; });
+      agent.Gather({dead}, std::chrono::seconds(30),
+                  [&](p2p::Agent::GatherResult) { resolved++; });
     }
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  host.Stop();
+  agent.Stop();
   stop = true;
   caller.join();
   // every request the caller made either resolved before Stop() returned or
   // was refused on the spot afterwards; count them against what was issued
   // by issuing two more, which must be refused synchronously
   const int before = resolved.load();
-  host.Punch(Offer({InetAddress::from("203.0.113.1", 9)}, 5, true),
+  agent.Punch(Offer({InetAddress::from("203.0.113.1", 9)}, 5, true),
                   [&](Result r, std::shared_ptr<PeerSession>) {
                     EXPECT_EQ(r, Result::AlreadyStopped);
                     resolved++;
                   });
-  host.Gather({}, std::chrono::seconds(1),
-              [&](p2p::Host::GatherResult r) {
+  agent.Gather({}, std::chrono::seconds(1),
+              [&](p2p::Agent::GatherResult r) {
                 EXPECT_EQ(r.result, Result::AlreadyStopped);
                 resolved++;
               });
   EXPECT_EQ(resolved.load(), before + 2);
 }
 
-TEST(P2PHost, PunchTowardNothingTimesOut) {
+TEST(P2PAgent, PunchTowardNothingTimesOut) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::HostConfig config;
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
-  p2p::Host host{config};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{config};
+  ASSERT_EQ(agent.Start(), Result::Success);
 
   PunchOutcome outcome;
   std::shared_ptr<InetAddress> dead = InetAddress::from("203.0.113.1", 9);
-  host.Punch(Offer({dead}, 3, true, std::chrono::milliseconds(300)),
+  agent.Punch(Offer({dead}, 3, true, std::chrono::milliseconds(300)),
                   outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_EQ(outcome.result, Result::Timeout);
   EXPECT_FALSE(outcome.Session());
-  host.Stop();
+  agent.Stop();
 }
 
 // A multi-homed peer offers every address it has, and most of them are dead
 // to anyone not on that network. Every candidate is raced at once, so a punch
 // must not get slower the more of them it is given.
-TEST(P2PHost, ManyDeadCandidatesDoNotSlowThePunch) {
+TEST(P2PAgent, ManyDeadCandidatesDoNotSlowThePunch) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::HostConfig config;
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
-  p2p::Host a{config};
-  p2p::Host b{config};
+  p2p::Agent a{config};
+  p2p::Agent b{config};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -378,7 +378,7 @@ TEST(P2PHost, ManyDeadCandidatesDoNotSlowThePunch) {
 
 // --- The mesh through the rendezvous ------------------------------------------
 
-using znet::test::HostLocatorProbe;
+using znet::test::AgentLocatorProbe;
 
 TEST(PeerLocatorEndToEnd, ThreePlayersFormAMesh) {
   ASSERT_EQ(Init(), Result::Success);
@@ -390,9 +390,9 @@ TEST(PeerLocatorEndToEnd, ThreePlayersFormAMesh) {
   ASSERT_EQ(relay.Start(), Result::Success);
   const PortNumber port = relay.bind_address()->port();
 
-  HostLocatorProbe a{port};
-  HostLocatorProbe b{port};
-  HostLocatorProbe c{port};
+  AgentLocatorProbe a{port};
+  AgentLocatorProbe b{port};
+  AgentLocatorProbe c{port};
   ASSERT_EQ(a.locator.Connect(), Result::Success);
   ASSERT_EQ(b.locator.Connect(), Result::Success);
   ASSERT_EQ(c.locator.Connect(), Result::Success);
@@ -420,7 +420,7 @@ TEST(PeerLocatorEndToEnd, ThreePlayersFormAMesh) {
   EXPECT_TRUE(WaitUntil([&]() { return a.AllSessionsReady(2); }, 10000));
   EXPECT_TRUE(WaitUntil([&]() { return b.AllSessionsReady(2); }, 10000));
   EXPECT_TRUE(WaitUntil([&]() { return c.AllSessionsReady(2); }, 10000));
-  EXPECT_EQ(a.locator.host().session_count(), 2u);
+  EXPECT_EQ(a.locator.agent().session_count(), 2u);
 
   a.locator.Disconnect();
   b.locator.Disconnect();

@@ -99,7 +99,7 @@ struct RelayServerConfig {
  * Pairings cost memory, not ports or descriptors.
  *
  * The same port answers Reflect with the address the probe arrived from,
- * which is how Host::Gather learns a socket's public mapping. A Reflect is
+ * which is how Agent::Gather learns a socket's public mapping. A Reflect is
  * padded to be larger than its answer, so the port cannot amplify.
  */
 class RelayServer {

@@ -133,7 +133,7 @@ void ZDTTransportLayer::DrainSocket() {
       break;
     }
     recv_scratch_.CommitWrite(len);
-    // a relayed session is always driven by a p2p::Host, which strips the
+    // a relayed session is always driven by a p2p::Agent, which strips the
     // relay header before OnDatagram(); a self-draining transport is direct
     inbox_->Push(Buffer(recv_scratch_.data(), recv_scratch_.size(),
                         Endianness::BigEndian),

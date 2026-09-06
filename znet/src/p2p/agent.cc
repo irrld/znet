@@ -8,7 +8,7 @@
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
 
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 
 #include "znet/backends/zdt.h"
 #include "znet/backends/zdt/zdt_cookie.h"
@@ -31,13 +31,13 @@ namespace {
 ZNET_INLINE_CONSTEXPR size_t kPredictedPortCount = 8;
 }  // namespace
 
-Host::Host(const HostConfig& config) : config_(config) {}
+Agent::Agent(const AgentConfig& config) : config_(config) {}
 
-Host::~Host() {
+Agent::~Agent() {
   Stop();
 }
 
-Result Host::Start() {
+Result Agent::Start() {
   if (running_.load()) {
     return Result::AlreadyListening;
   }
@@ -56,7 +56,7 @@ Result Host::Start() {
                          config_.session_options.zdt.socket_recv_buffer,
                          config_.session_options.zdt.socket_send_buffer);
   if (socket_->Bind(*bind_address) != Result::Success) {
-    ZNET_LOG_ERROR("P2P host: failed to bind {}: {}", bind_address->readable(),
+    ZNET_LOG_ERROR("P2P agent: failed to bind {}: {}", bind_address->readable(),
                    GetLastErrorInfo());
     socket_->Close();
     socket_ = nullptr;
@@ -65,14 +65,14 @@ Result Host::Start() {
   local_address_ = socket_->local_address();
   // seeds itself; needs znet::Init(), which p2p usage already relies on for
   // GenerateGuid during a punch.
-  cookie_secret_.reset(new CookieSecret());
+  cookie_secret_ = std::make_unique<CookieSecret>();
   running_.store(true);
   task_.Run([this]() { TickLoop(); });
-  ZNET_LOG_INFO("P2P host up on {}", local_address_->readable());
+  ZNET_LOG_INFO("P2P agent up on {}", local_address_->readable());
   return Result::Success;
 }
 
-void Host::Stop() {
+void Agent::Stop() {
   if (!running_.exchange(false)) {
     return;
   }
@@ -114,11 +114,11 @@ void Host::Stop() {
   }
 }
 
-void Host::Gather(std::vector<std::shared_ptr<InetAddress>> reflectors,
+void Agent::Gather(std::vector<std::shared_ptr<InetAddress>> reflectors,
                   std::chrono::milliseconds timeout, GatherCallback on_done) {
   Gathering gathering;
-  gathering.probe.reset(
-      new internal::ReflectProbe(std::move(reflectors), clock::now(), timeout));
+  gathering.probe = std::make_unique<internal::ReflectProbe>(
+      std::move(reflectors), clock::now(), timeout);
   gathering.on_done = std::move(on_done);
   // running_ is checked under the same lock Stop() drains pending_gathers_
   // under, so a gather cannot slip in between the drain and the socket close
@@ -134,7 +134,7 @@ void Host::Gather(std::vector<std::shared_ptr<InetAddress>> reflectors,
   pending_gathers_.push_back(std::move(gathering));
 }
 
-void Host::Punch(PunchOffer offer, PunchCallback on_done) {
+void Agent::Punch(PunchOffer offer, PunchCallback on_done) {
   Result refusal = Result::Success;
   if (offer.candidates.empty()) {
     refusal = Result::InvalidAddress;
@@ -156,9 +156,9 @@ void Host::Punch(PunchOffer offer, PunchCallback on_done) {
     return;
   }
   PunchInFlight punch;
-  punch.machine.reset(new internal::ZDTPunch(
+  punch.machine = std::make_unique<internal::ZDTPunch>(
       std::move(offer), clock::now(),
-      config_.session_options.zdt.enable_connection_migration));
+      config_.session_options.zdt.enable_connection_migration);
   punch.on_done = std::move(on_done);
   std::unique_lock<std::mutex> lock(pending_mutex_);
   if (!running_.load()) {
@@ -171,7 +171,7 @@ void Host::Punch(PunchOffer offer, PunchCallback on_done) {
   pending_.push_back(std::move(punch));
 }
 
-void Host::TickLoop() {
+void Agent::TickLoop() {
   while (!task_.IsStopRequested()) {
     ApplyPendingRebind();
     cookie_secret_->MaybeRotate(config_.session_options.zdt.cookie_secret_rotation,
@@ -187,7 +187,7 @@ void Host::TickLoop() {
   }
 }
 
-std::string Host::RouteKey(const InetAddress& address, uint32_t channel) {
+std::string Agent::RouteKey(const InetAddress& address, uint32_t channel) {
   // the channel alone would let a stray from anywhere claim a relayed
   // session; with the relay's address in the key it has to come from there
   std::string key = address.readable();
@@ -198,7 +198,7 @@ std::string Host::RouteKey(const InetAddress& address, uint32_t channel) {
   return key;
 }
 
-bool Host::DrainSocket() {
+bool Agent::DrainSocket() {
   bool any = false;
   uint8_t buffer[ZNET_MAX_BUFFER_SIZE];
   for (;;) {
@@ -266,7 +266,7 @@ bool Host::DrainSocket() {
   return any;
 }
 
-bool Host::TickGathers() {
+bool Agent::TickGathers() {
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     for (auto& gathering : pending_gathers_) {
@@ -293,7 +293,7 @@ bool Host::TickGathers() {
   return any;
 }
 
-Host::GatherResult Host::CollectGather(
+Agent::GatherResult Agent::CollectGather(
     const internal::ReflectProbe& probe) const {
   GatherResult result;
   result.result = probe.result();
@@ -321,7 +321,7 @@ Host::GatherResult Host::CollectGather(
   return result;
 }
 
-bool Host::TickPunches() {
+bool Agent::TickPunches() {
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     for (auto& punch : pending_) {
@@ -375,7 +375,7 @@ bool Host::TickPunches() {
   return any;
 }
 
-bool Host::ProcessSessions() {
+bool Agent::ProcessSessions() {
   bool any = false;
   const auto now = clock::now();
   for (auto it = routes_.begin(); it != routes_.end();) {
@@ -393,11 +393,11 @@ bool Host::ProcessSessions() {
     // checked after Process(), which is what advances the handshake
     if (!route.waiters.empty()) {
       if (session->IsReady()) {
-        ZNET_LOG_INFO("P2P host: session with {} is ready",
+        ZNET_LOG_INFO("P2P agent: session with {} is ready",
                       session->remote_address()->readable());
         ResolveWaiters(route, Result::Success);
       } else if (now >= route.ready_deadline) {
-        ZNET_LOG_WARN("P2P host: {} punched but never finished its handshake",
+        ZNET_LOG_WARN("P2P agent: {} punched but never finished its handshake",
                       session->remote_address()->readable());
         ResolveWaiters(route, Result::Timeout);
         session->Close();
@@ -412,7 +412,7 @@ bool Host::ProcessSessions() {
   return any;
 }
 
-void Host::ResolveWaiters(Route& route, Result result) {
+void Agent::ResolveWaiters(Route& route, Result result) {
   // moved out first: a callback may punch again and reach this route
   std::vector<PunchCallback> waiters;
   waiters.swap(route.waiters);
@@ -423,7 +423,7 @@ void Host::ResolveWaiters(Route& route, Result result) {
   }
 }
 
-void Host::HandleOffline(const std::shared_ptr<InetAddress>& from,
+void Agent::HandleOffline(const std::shared_ptr<InetAddress>& from,
                          uint32_t channel, const uint8_t* data, size_t len) {
   // attribution is by source address: the gather whose reflector answered,
   // else the punch whose candidates hold the sender (and, through a relay,
@@ -452,7 +452,7 @@ void Host::HandleOffline(const std::shared_ptr<InetAddress>& from,
   }
 }
 
-void Host::CompletePunch(size_t index, const internal::PunchOutcome& outcome) {
+void Agent::CompletePunch(size_t index, const internal::PunchOutcome& outcome) {
   PunchInFlight punch = std::move(punches_[index]);
   punches_.erase(punches_.begin() + static_cast<long>(index));
   const PunchOffer& offer = punch.machine->offer();
@@ -485,22 +485,22 @@ void Host::CompletePunch(size_t index, const internal::PunchOutcome& outcome) {
   routes_[RouteKey(*from, outcome.channel)] = std::move(route);
   session_count_.store(routes_.size(), std::memory_order_relaxed);
   // ProcessSessions resolves the waiters once the handshake lands.
-  ZNET_LOG_INFO("P2P host: punched {} (punch id {}){}, handshaking",
+  ZNET_LOG_INFO("P2P agent: punched {} (punch id {}){}, handshaking",
                 from->readable(), offer.punch_id,
                 outcome.channel != 0 ? " through the relay" : "");
 }
 
-void Host::FailPunch(size_t index, Result reason) {
+void Agent::FailPunch(size_t index, Result reason) {
   PunchInFlight punch = std::move(punches_[index]);
   punches_.erase(punches_.begin() + static_cast<long>(index));
-  ZNET_LOG_WARN("P2P host: punch {} failed: {}",
+  ZNET_LOG_WARN("P2P agent: punch {} failed: {}",
                 punch.machine->offer().punch_id, GetResultString(reason));
   if (punch.on_done) {
     punch.on_done(reason, nullptr);
   }
 }
 
-bool Host::ChallengeNewPath(uint64_t cid,
+bool Agent::ChallengeNewPath(uint64_t cid,
                             const std::shared_ptr<InetAddress>& from) {
   // a live session must claim this cid, or this is not a moved peer: it may be
   // an in-flight punch's first datagram, which HandleOffline still needs
@@ -521,7 +521,7 @@ bool Host::ChallengeNewPath(uint64_t cid,
   return true;
 }
 
-void Host::CompletePathMigration(const std::shared_ptr<InetAddress>& from,
+void Agent::CompletePathMigration(const std::shared_ptr<InetAddress>& from,
                                  const uint8_t* data, size_t len) {
   Buffer buffer(reinterpret_cast<const char*>(data), len,
                 Endianness::BigEndian);
@@ -546,12 +546,12 @@ void Host::CompletePathMigration(const std::shared_ptr<InetAddress>& from,
     routes_.erase(it);
     route.transport->MigratePeer(from);
     routes_[new_key] = std::move(route);
-    ZNET_LOG_INFO("P2P host: migrated a session to {}", new_key);
+    ZNET_LOG_INFO("P2P agent: migrated a session to {}", new_key);
     return;
   }
 }
 
-void Host::AnswerPathChallenge(const std::shared_ptr<InetAddress>& from,
+void Agent::AnswerPathChallenge(const std::shared_ptr<InetAddress>& from,
                                const uint8_t* data, size_t len) {
   Buffer buffer(reinterpret_cast<const char*>(data), len,
                 Endianness::BigEndian);
@@ -577,7 +577,7 @@ void Host::AnswerPathChallenge(const std::shared_ptr<InetAddress>& from,
   socket_->SendTo(*from, out.data(), out.size());
 }
 
-Result Host::Rebind(const std::string& ip, PortNumber port) {
+Result Agent::Rebind(const std::string& ip, PortNumber port) {
   if (!running_.load()) {
     return Result::AlreadyStopped;
   }
@@ -586,7 +586,7 @@ Result Host::Rebind(const std::string& ip, PortNumber port) {
       address->ipv() == InetProtocolVersion::Unix) {
     return Result::InvalidAddress;
   }
-  // bind the new socket on the caller's thread; a failure leaves the host as is
+  // bind the new socket on the caller's thread; a failure leaves the agent as is
   auto new_socket = std::make_shared<UDPSocket>();
   if (new_socket->Open(address->ipv()) != Result::Success) {
     return Result::CannotCreateSocket;
@@ -597,12 +597,12 @@ Result Host::Rebind(const std::string& ip, PortNumber port) {
                          config_.session_options.zdt.socket_recv_buffer,
                          config_.session_options.zdt.socket_send_buffer);
   if (new_socket->Bind(*address) != Result::Success) {
-    ZNET_LOG_ERROR("P2P host: rebind failed to bind {}: {}", address->readable(),
+    ZNET_LOG_ERROR("P2P agent: rebind failed to bind {}: {}", address->readable(),
                    GetLastErrorInfo());
     new_socket->Close();
     return Result::CannotBind;
   }
-  // the host thread owns the socket and every transport, so it applies the swap
+  // the agent thread owns the socket and every transport, so it applies the swap
   std::lock_guard<std::mutex> lock(pending_mutex_);
   if (!running_.load()) {
     return Result::AlreadyStopped;
@@ -611,7 +611,7 @@ Result Host::Rebind(const std::string& ip, PortNumber port) {
   return Result::Success;
 }
 
-void Host::ApplyPendingRebind() {
+void Agent::ApplyPendingRebind() {
   std::shared_ptr<UDPSocket> next;
   {
     std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -632,7 +632,7 @@ void Host::ApplyPendingRebind() {
     std::lock_guard<std::mutex> lock(address_mutex_);
     local_address_ = bound;
   }
-  ZNET_LOG_INFO("P2P host: rebound to {}", bound->readable());
+  ZNET_LOG_INFO("P2P agent: rebound to {}", bound->readable());
 }
 
 }  // namespace p2p

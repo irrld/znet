@@ -59,7 +59,7 @@ set(ZNET_SOURCES
         src/init.cc
         src/version.cc
         src/p2p/rendezvous_server.cc
-        src/p2p/host.cc
+        src/p2p/agent.cc
         src/backend/backend.cc
         src/backend/tcp.cc
         src/backend/zdt/zdt_ack_history.cc

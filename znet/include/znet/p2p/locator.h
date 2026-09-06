@@ -16,7 +16,7 @@
 #include "znet/client_events.h"
 #include "znet/compat.h"
 #include "znet/p2p/events.h"
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 #include "znet/p2p/rendezvous.h"
 
 #include <set>
@@ -46,7 +46,7 @@ struct PeerLocatorConfig {
   PortNumber server_port = 0;
   /** @brief The shared punch socket: where it binds and what every
    *         punched session is built with. */
-  HostConfig host;
+  AgentConfig agent;
   /** @brief How long the reflectors get before the gathering is sent with
    *         whatever came back. */
   std::chrono::milliseconds gather_timeout{2000};
@@ -63,11 +63,11 @@ struct PeerLocatorConfig {
  * @brief The whole flow over znet's rendezvous, for two players or a mesh:
  *        gather, exchange, punch, with the relay as the fallback.
  *
- * Connect() brings up a Host on the shared punch socket and the link to the
+ * Connect() brings up an Agent on the shared punch socket and the link to the
  * rendezvous. The welcome names this peer and says where to gather from;
  * the gathering goes back, and PeerLocatorReadyEvent fires. From then on
  * AskPeer may be called any number of times and the punches overlap freely
- * on the one socket. Each success fires PeerConnectedEvent, on the host's
+ * on the one socket. Each success fires PeerConnectedEvent, on the agent's
  * thread, with a session whose handshake has finished, which is why that
  * event is the place for its codec and handler.
  *
@@ -88,7 +88,7 @@ class PeerLocator {
   Result Connect();
 
   /** @brief Leaves: the link, pending punches and every punched session
-   *         all end. Joins the host's thread, so never from inside one of
+   *         all end. Joins the agent's thread, so never from inside one of
    *         this locator's events. */
   Result Disconnect();
 
@@ -117,7 +117,7 @@ class PeerLocator {
   ZNET_NODISCARD std::string peer_name() const;
 
   /** @brief The socket everything punches from, e.g. for session_count(). */
-  ZNET_NODISCARD const Host& host() const { return host_; }
+  ZNET_NODISCARD const Agent& agent() const { return agent_; }
 
  private:
   template <typename Locator>
@@ -128,7 +128,7 @@ class PeerLocator {
   bool OnDisconnectEvent(ClientDisconnectedFromServerEvent& event);
   bool OnConnectionFailedEvent(ClientConnectionFailedEvent& event);
   void OnWelcome(const WelcomePacket& welcome);
-  void OnGathered(Host::GatherResult result);
+  void OnGathered(Agent::GatherResult result);
   void OnPeerNotFound(const std::string& target_peer);
   void OnPunchOffer(const PunchOfferPacket& offer);
   // a former partner re-asked after moving: re-gather and re-ask it back
@@ -143,7 +143,7 @@ class PeerLocator {
                   const std::string& target_peer);
 
   PeerLocatorConfig config_;
-  Host host_;
+  Agent agent_;
   Client client_;
   EventCallbackFn event_callback_;
   mutable std::mutex mutex_;

@@ -9,7 +9,7 @@
 //
 
 //
-// The three steps by hand, between two hosts in one process: both gather
+// The three steps by hand, between two agents in one process: both gather
 // against a relay, the candidates are swapped in memory (the exchange a
 // broker would carry), and both punch. --force-relay leaves the direct
 // candidates out, so the relay carries the session the way it does for two
@@ -18,7 +18,7 @@
 
 #include "znet/codec.h"
 #include "znet/init.h"
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 #include "znet/p2p/punch.h"
 #include "znet/p2p/relay_server.h"
 #include "znet/packet_handler.h"
@@ -76,13 +76,13 @@ class NoteHandler : public PacketHandler<NoteHandler, NotePacket> {
   std::string name_;
 };
 
-// Step 1, gather. It resolves on the host's thread; this waits for it.
-std::vector<p2p::Candidate> GatherSync(p2p::Host& host, const std::string& name,
+// Step 1, gather. It resolves on the agent's thread; this waits for it.
+std::vector<p2p::Candidate> GatherSync(p2p::Agent& agent, const std::string& name,
                                        std::shared_ptr<InetAddress> reflector) {
   std::promise<std::vector<p2p::Candidate>> promise;
   auto future = promise.get_future();
-  host.Gather({std::move(reflector)}, std::chrono::seconds(2),
-              [&](p2p::Host::GatherResult result) {
+  agent.Gather({std::move(reflector)}, std::chrono::seconds(2),
+              [&](p2p::Agent::GatherResult result) {
                 if (result.result != Result::Success) {
                   ZNET_LOG_WARN("{}: gather: {}", name,
                                 GetResultString(result.result));
@@ -120,13 +120,13 @@ p2p::PunchOffer OfferFor(std::vector<p2p::Candidate> peer_candidates,
   return offer;
 }
 
-// Step 3, the punch. The callback fires on the host's thread with a session
+// Step 3, the punch. The callback fires on the agent's thread with a session
 // whose handshake is done, so the codec and handler belong right there.
 std::future<std::shared_ptr<PeerSession>> StartPunch(
-    p2p::Host& host, const std::string& name, p2p::PunchOffer offer,
+    p2p::Agent& agent, const std::string& name, p2p::PunchOffer offer,
     std::shared_ptr<Codec> codec) {
   auto promise = std::make_shared<std::promise<std::shared_ptr<PeerSession>>>();
-  host.Punch(std::move(offer), [promise, name, codec](
+  agent.Punch(std::move(offer), [promise, name, codec](
                                    Result result,
                                    std::shared_ptr<PeerSession> session) {
     if (result != Result::Success) {
@@ -152,7 +152,7 @@ void SendNote(const std::shared_ptr<PeerSession>& session,
 
 int main(int argc, char* argv[]) {
   cxxopts::Options opts("p2p-steps",
-                        "gather, exchange and punch between two hosts in one "
+                        "gather, exchange and punch between two agents in one "
                         "process, through a relay when told to");
   opts.add_options()
       ("force-relay", "Offer only the relayed candidate, so the relay carries it")
@@ -170,7 +170,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // The relay doubles as the reflector both hosts gather against. Port 0
+  // The relay doubles as the reflector both agents gather against. Port 0
   // takes an ephemeral one; a deployment fixes it and opens it for UDP.
   p2p::RelayServerConfig relay_config;
   relay_config.bind_address = "127.0.0.1";
@@ -181,14 +181,14 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // One host per peer: the socket every punch and session of that peer
+  // One agent per peer: the socket every punch and session of that peer
   // runs on. Two in one process only because this is an example.
-  p2p::HostConfig host_config;
-  host_config.bind_address = "127.0.0.1";
-  p2p::Host a{host_config};
-  p2p::Host b{host_config};
+  p2p::AgentConfig agent_config;
+  agent_config.bind_address = "127.0.0.1";
+  p2p::Agent a{agent_config};
+  p2p::Agent b{agent_config};
   if (a.Start() != Result::Success || b.Start() != Result::Success) {
-    ZNET_LOG_ERROR("A host failed to start");
+    ZNET_LOG_ERROR("An agent failed to start");
     return 1;
   }
 
@@ -226,7 +226,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // Both sessions are ready and driven by their hosts; traffic is end to
+  // Both sessions are ready and driven by their agents; traffic is end to
   // end encrypted whether or not the relay is in the path.
   SendNote(a_session, "hello from a");
   SendNote(b_session, "hello from b");

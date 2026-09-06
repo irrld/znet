@@ -15,7 +15,7 @@
 
 #include "p2p_probes.h"
 #include "znet/init.h"
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 #include "znet/p2p/internal/gather.h"
 #include "znet/p2p/relay_server.h"
 
@@ -44,8 +44,8 @@ std::unique_ptr<p2p::RelayServer> StartRelay() {
   return relay;
 }
 
-p2p::HostConfig LoopbackHost() {
-  p2p::HostConfig config;
+p2p::AgentConfig LoopbackHost() {
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
   return config;
 }
@@ -73,11 +73,11 @@ TEST(LocalCandidates, EveryAddressCarriesThePort) {
 TEST(HostGather, LearnsThePublicMappingFromAReflector) {
   ASSERT_EQ(Init(), Result::Success);
   auto relay = StartRelay();
-  p2p::Host host{LoopbackHost()};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{LoopbackHost()};
+  ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
-  host.Gather({relay->address()}, std::chrono::seconds(2),
+  agent.Gather({relay->address()}, std::chrono::seconds(2),
               outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_EQ(outcome.result, Result::Success);
@@ -86,36 +86,36 @@ TEST(HostGather, LearnsThePublicMappingFromAReflector) {
   const auto candidates = outcome.Candidates();
   EXPECT_EQ(candidates.front().type, p2p::CandidateType::Reflexive);
   EXPECT_EQ(candidates.front().address->readable(),
-            "127.0.0.1:" + std::to_string(host.punch_port()));
-  host.Stop();
+            "127.0.0.1:" + std::to_string(agent.punch_port()));
+  agent.Stop();
   relay->Stop();
 }
 
 TEST(HostGather, WithoutReflectorsReportsTheHostCandidates) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Host host{LoopbackHost()};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{LoopbackHost()};
+  ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
-  host.Gather({}, std::chrono::seconds(2), outcome.Callback());
+  agent.Gather({}, std::chrono::seconds(2), outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_EQ(outcome.result, Result::Success);
   EXPECT_EQ(outcome.CountOf(p2p::CandidateType::Reflexive), 0);
   EXPECT_GE(outcome.CountOf(p2p::CandidateType::Host), 1);
   for (const auto& candidate : outcome.Candidates()) {
-    EXPECT_EQ(candidate.address->port(), host.punch_port());
+    EXPECT_EQ(candidate.address->port(), agent.punch_port());
   }
-  host.Stop();
+  agent.Stop();
 }
 
 TEST(HostGather, ADeadReflectorTimesOutWithTheHostCandidates) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Host host{LoopbackHost()};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{LoopbackHost()};
+  ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
   const auto started = std::chrono::steady_clock::now();
-  host.Gather({InetAddress::from("203.0.113.1", 9)},
+  agent.Gather({InetAddress::from("203.0.113.1", 9)},
               std::chrono::milliseconds(300), outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_LT(std::chrono::steady_clock::now() - started,
@@ -124,18 +124,18 @@ TEST(HostGather, ADeadReflectorTimesOutWithTheHostCandidates) {
   EXPECT_EQ(outcome.CountOf(p2p::CandidateType::Reflexive), 0);
   EXPECT_GE(outcome.CountOf(p2p::CandidateType::Host), 1)
       << "what was learned locally is still worth handing over";
-  host.Stop();
+  agent.Stop();
 }
 
 TEST(HostGather, StoppingTheHostFailsAPendingGather) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Host host{LoopbackHost()};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{LoopbackHost()};
+  ASSERT_EQ(agent.Start(), Result::Success);
   GatherOutcome outcome;
-  host.Gather({InetAddress::from("203.0.113.1", 9)}, std::chrono::seconds(30),
+  agent.Gather({InetAddress::from("203.0.113.1", 9)}, std::chrono::seconds(30),
               outcome.Callback());
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  host.Stop();
+  agent.Stop();
   ASSERT_TRUE(outcome.done.load());
   EXPECT_EQ(outcome.result, Result::AlreadyStopped);
 }
@@ -145,8 +145,8 @@ TEST(HostGather, StoppingTheHostFailsAPendingGather) {
 TEST(HostGather, GatheredCandidatesCarryAPunch) {
   ASSERT_EQ(Init(), Result::Success);
   auto relay = StartRelay();
-  p2p::Host a{LoopbackHost()};
-  p2p::Host b{LoopbackHost()};
+  p2p::Agent a{LoopbackHost()};
+  p2p::Agent b{LoopbackHost()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -188,16 +188,16 @@ TEST(HostGather, GatheredCandidatesCarryAPunch) {
 TEST(HostGather, OneReflectorLeavesTheNatTypeUnknown) {
   ASSERT_EQ(Init(), Result::Success);
   auto relay = StartRelay();
-  p2p::Host host{LoopbackHost()};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{LoopbackHost()};
+  ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
-  host.Gather({relay->address()}, std::chrono::seconds(2), outcome.Callback());
+  agent.Gather({relay->address()}, std::chrono::seconds(2), outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_EQ(outcome.result, Result::Success);
   // one reflector cannot classify the mapping
   EXPECT_EQ(outcome.nat_type, p2p::NatType::Unknown);
-  host.Stop();
+  agent.Stop();
   relay->Stop();
 }
 

@@ -41,7 +41,7 @@
 #include "znet/packet_handler.h"
 
 using namespace znet;
-using znet::test::HostLocatorProbe;
+using znet::test::AgentLocatorProbe;
 using znet::test::TCPLocatorProbe;
 
 namespace {
@@ -264,18 +264,18 @@ TEST(TCPPeerLocatorEndToEnd, AskingForAnUnknownPeerFailsTheExchange) {
   rendezvous.Stop();
 }
 
-// the same flow over ZDT, through the Host-based locator
+// the same flow over ZDT, through the Agent-based locator
 void RunPunchEndToEnd(
     p2p::RendezvousServerConfig config,
-    std::function<void(p2p::RendezvousServer&, HostLocatorProbe&,
-                       HostLocatorProbe&)> check) {
+    std::function<void(p2p::RendezvousServer&, AgentLocatorProbe&,
+                       AgentLocatorProbe&)> check) {
   ASSERT_EQ(Init(), Result::Success);
   p2p::RendezvousServer rendezvous{config};
   ASSERT_EQ(rendezvous.Start(), Result::Success);
   const PortNumber port = rendezvous.bind_address()->port();
 
-  HostLocatorProbe a{port};
-  HostLocatorProbe b{port};
+  AgentLocatorProbe a{port};
+  AgentLocatorProbe b{port};
   ASSERT_TRUE(PairUp(a, b)) << "the punch failed";
   check(rendezvous, a, b);
   a.locator.Disconnect();
@@ -285,8 +285,8 @@ void RunPunchEndToEnd(
 
 TEST(PeerLocatorEndToEnd, PunchesOverZDT) {
   RunPunchEndToEnd(LoopbackRendezvous(ConnectionType::ZDT),
-                   [](p2p::RendezvousServer&, HostLocatorProbe& a,
-                      HostLocatorProbe& b) {
+                   [](p2p::RendezvousServer&, AgentLocatorProbe& a,
+                      AgentLocatorProbe& b) {
                      EXPECT_TRUE(WaitUntil(
                          [&]() {
                            return a.Session()->IsReady() &&
@@ -298,8 +298,8 @@ TEST(PeerLocatorEndToEnd, PunchesOverZDT) {
 
 TEST(PeerLocatorEndToEnd, ConnectedEventIsReady) {
   RunPunchEndToEnd(LoopbackRendezvous(ConnectionType::ZDT),
-                   [](p2p::RendezvousServer&, HostLocatorProbe& a,
-                      HostLocatorProbe& b) {
+                   [](p2p::RendezvousServer&, AgentLocatorProbe& a,
+                      AgentLocatorProbe& b) {
                      EXPECT_TRUE(a.ready_at_event.load());
                      EXPECT_TRUE(b.ready_at_event.load());
                    });
@@ -313,7 +313,7 @@ TEST(PeerLocatorEndToEnd, ConnectedEventIsReady) {
 TEST(PeerLocatorEndToEnd, RelocateRepunchesTheConnectedPeer) {
   RunPunchEndToEnd(
       LoopbackRendezvous(ConnectionType::ZDT),
-      [](p2p::RendezvousServer&, HostLocatorProbe& a, HostLocatorProbe& b) {
+      [](p2p::RendezvousServer&, AgentLocatorProbe& a, AgentLocatorProbe& b) {
         const int a_before = a.connected.load();
         const int b_before = b.connected.load();
         ASSERT_EQ(a.locator.Relocate(), Result::Success);
@@ -333,8 +333,8 @@ TEST(PeerLocatorEndToEnd, RelocateRepunchesTheConnectedPeer) {
 TEST(PeerLocatorEndToEnd, IdlePunchedSessionsDoNotSpin) {
   RunPunchEndToEnd(
       LoopbackRendezvous(ConnectionType::ZDT),
-      [](p2p::RendezvousServer&, HostLocatorProbe&, HostLocatorProbe&) {
-        // two idle hosts, one session each, for one wall second. Spinning
+      [](p2p::RendezvousServer&, AgentLocatorProbe&, AgentLocatorProbe&) {
+        // two idle agents, one session each, for one wall second. Spinning
         // ticks would cost ~two CPU seconds; dozing ones cost almost nothing.
         const std::clock_t cpu_before = std::clock();
         std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -350,7 +350,7 @@ TEST(PeerLocatorEndToEnd, ATCPRendezvousFailsAtTheWelcome) {
   ASSERT_EQ(Init(), Result::Success);
   p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::TCP)};
   ASSERT_EQ(rendezvous.Start(), Result::Success);
-  HostLocatorProbe a{rendezvous.bind_address()->port()};
+  AgentLocatorProbe a{rendezvous.bind_address()->port()};
   ASSERT_EQ(a.locator.Connect(), Result::Success);
   ASSERT_TRUE(WaitFor(a.failed, 5000));
   {
@@ -389,7 +389,7 @@ TEST(PeerLocatorEndToEnd, AForeignProtocolVersionFailsAtTheWelcome) {
   ASSERT_EQ(impostor.Bind(), Result::Success);
   ASSERT_EQ(impostor.Listen(), Result::Success);
 
-  HostLocatorProbe a{impostor.bind_address()->port()};
+  AgentLocatorProbe a{impostor.bind_address()->port()};
   ASSERT_EQ(a.locator.Connect(), Result::Success);
   ASSERT_TRUE(WaitFor(a.failed, 5000));
   {
@@ -405,7 +405,7 @@ TEST(PeerLocatorEndToEnd, AskingForAnUnknownPeerFailsTheExchange) {
   ASSERT_EQ(Init(), Result::Success);
   p2p::RendezvousServer rendezvous{LoopbackRendezvous(ConnectionType::ZDT)};
   ASSERT_EQ(rendezvous.Start(), Result::Success);
-  HostLocatorProbe a{rendezvous.bind_address()->port()};
+  AgentLocatorProbe a{rendezvous.bind_address()->port()};
   ASSERT_EQ(a.locator.Connect(), Result::Success);
   ASSERT_TRUE(WaitFor(a.ready, 5000));
   ASSERT_EQ(a.locator.AskPeer("no-such-peer"), Result::Success);
@@ -421,7 +421,7 @@ TEST(PeerLocatorEndToEnd, AskingForAnUnknownPeerFailsTheExchange) {
 
 TEST(PeerLocatorEndToEnd, AskingBeforeTheLinkIsRefused) {
   ASSERT_EQ(Init(), Result::Success);
-  HostLocatorProbe a{1};
+  AgentLocatorProbe a{1};
   EXPECT_EQ(a.locator.AskPeer("anyone"), Result::NotConnected);
 }
 
@@ -430,15 +430,15 @@ TEST(PeerLocatorEndToEnd, AskingBeforeTheLinkIsRefused) {
 TEST(PeerLocatorWithRelay, ReadyReportsTheReflexiveEndpoint) {
   p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
   EnableLoopbackRelay(config);
-  RunPunchEndToEnd(config, [](p2p::RendezvousServer&, HostLocatorProbe& a,
-                              HostLocatorProbe& b) {
+  RunPunchEndToEnd(config, [](p2p::RendezvousServer&, AgentLocatorProbe& a,
+                              AgentLocatorProbe& b) {
     // the reflector on the relay's control port told each socket its mapping,
     // which on loopback is the socket itself
     ASSERT_TRUE(a.Endpoint());
     EXPECT_EQ(a.Endpoint()->readable(),
-              "127.0.0.1:" + std::to_string(a.locator.host().punch_port()));
+              "127.0.0.1:" + std::to_string(a.locator.agent().punch_port()));
     EXPECT_EQ(b.Endpoint()->readable(),
-              "127.0.0.1:" + std::to_string(b.locator.host().punch_port()));
+              "127.0.0.1:" + std::to_string(b.locator.agent().punch_port()));
   });
 }
 
@@ -447,7 +447,7 @@ TEST(PeerLocatorWithRelay, PunchesDirectAndTheRelayIsFreed) {
   EnableLoopbackRelay(config);
   config.relay.idle_timeout = std::chrono::milliseconds(500);
   RunPunchEndToEnd(config, [](p2p::RendezvousServer& rendezvous,
-                              HostLocatorProbe& a, HostLocatorProbe& b) {
+                              AgentLocatorProbe& a, AgentLocatorProbe& b) {
     // both were offered the relay and bound it, the direct path won, and
     // the unused allocation goes back once it idles
     EXPECT_NE(a.Session()->remote_address()->readable(),
@@ -912,7 +912,7 @@ PortNumber FreePortLocal(int socket_type) {
 // The punch must still find the peer inside the budget, and it must not get
 // slower just because a multi-homed peer offered more addresses: a candidate
 // nobody answers has to cost a socket, not a share of the budget. The ZDT
-// counterpart is P2PHost.ManyDeadCandidatesDoNotSlowThePunch.
+// counterpart is P2PAgent.ManyDeadCandidatesDoNotSlowThePunch.
 void RunTCPCandidateRace(PortNumber port_a, PortNumber port_b,
                          int dead_count = 1) {
   std::shared_ptr<InetAddress> local_a = InetAddress::from("127.0.0.1", port_a);

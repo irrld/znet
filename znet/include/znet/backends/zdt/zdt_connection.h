@@ -18,7 +18,7 @@ namespace znet {
 namespace backends {
 
 // per-connection parameters settled by the handshake. In its own header so
-// holders of one (p2p::Host) need none of the ZDT protocol surface.
+// holders of one (p2p::Agent) need none of the ZDT protocol surface.
 struct ZDTConnection {
   uint16_t mtu = 1200;
   uint64_t local_guid = 0;

@@ -43,7 +43,7 @@ target_link_libraries(znet-tests-session PRIVATE gtest_main znet)
 
 add_test(NAME session-unit-tests COMMAND znet-tests-session)
 
-add_executable(znet-tests-p2p p2p_host.cc)
+add_executable(znet-tests-p2p p2p_agent.cc)
 znet_apply_cxx_standard(znet-tests-p2p)
 target_link_libraries(znet-tests-p2p PRIVATE gtest_main znet)
 

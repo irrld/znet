@@ -18,7 +18,7 @@
 #include "znet/backends/zdt/zdt_net.h"
 #include "znet/backends/zdt/zdt_wire.h"
 #include "znet/init.h"
-#include "znet/p2p/host.h"
+#include "znet/p2p/agent.h"
 #include "znet/p2p/internal/zdt_punch.h"
 #include "znet/p2p/relay_server.h"
 
@@ -500,19 +500,19 @@ std::shared_ptr<InetAddress> Dead() {
   return InetAddress::from("203.0.113.1", 9);
 }
 
-std::shared_ptr<InetAddress> HostAddr(const p2p::Host& host) {
-  return InetAddress::from("127.0.0.1", host.punch_port());
+std::shared_ptr<InetAddress> HostAddr(const p2p::Agent& agent) {
+  return InetAddress::from("127.0.0.1", agent.punch_port());
 }
 
-p2p::HostConfig LoopbackHost() {
-  p2p::HostConfig config;
+p2p::AgentConfig LoopbackHost() {
+  p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
   return config;
 }
 
 // punches both hosts on their offers and waits for both to resolve
-void PunchBoth(p2p::Host& a, p2p::PunchOffer to_b, PunchOutcome& at_a,
-               p2p::Host& b, p2p::PunchOffer to_a, PunchOutcome& at_b) {
+void PunchBoth(p2p::Agent& a, p2p::PunchOffer to_b, PunchOutcome& at_a,
+               p2p::Agent& b, p2p::PunchOffer to_a, PunchOutcome& at_b) {
   a.Punch(std::move(to_b), at_a.Callback());
   b.Punch(std::move(to_a), at_b.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return at_a.done.load() && at_b.done.load(); },
@@ -539,8 +539,8 @@ TEST(RelayedPunch, ConnectsThroughTheRelayWhenDirectFails) {
   fx.Start();
   p2p::RelayServer::Allocation allocation;
   ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Host a{LoopbackHost()};
-  p2p::Host b{LoopbackHost()};
+  p2p::Agent a{LoopbackHost()};
+  p2p::Agent b{LoopbackHost()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -584,7 +584,7 @@ TEST(RelayedPunch, ConnectsThroughTheRelayWhenDirectFails) {
   fx.relay->Stop();
 }
 
-// two relayed sessions on one host share the relay's address and are told
+// two relayed sessions on one agent share the relay's address and are told
 // apart by channel alone
 TEST(RelayedPunch, OneHostCarriesTwoRelayedPeers) {
   ASSERT_EQ(Init(), Result::Success);
@@ -594,9 +594,9 @@ TEST(RelayedPunch, OneHostCarriesTwoRelayedPeers) {
   p2p::RelayServer::Allocation to_c;
   ASSERT_EQ(fx.relay->Allocate(to_b), Result::Success);
   ASSERT_EQ(fx.relay->Allocate(to_c), Result::Success);
-  p2p::Host a{LoopbackHost()};
-  p2p::Host b{LoopbackHost()};
-  p2p::Host c{LoopbackHost()};
+  p2p::Agent a{LoopbackHost()};
+  p2p::Agent b{LoopbackHost()};
+  p2p::Agent c{LoopbackHost()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
   ASSERT_EQ(c.Start(), Result::Success);
@@ -653,8 +653,8 @@ TEST(RelayedPunch, DirectWinsWhenItWorks) {
   fx.Start();
   p2p::RelayServer::Allocation allocation;
   ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Host a{LoopbackHost()};
-  p2p::Host b{LoopbackHost()};
+  p2p::Agent a{LoopbackHost()};
+  p2p::Agent b{LoopbackHost()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -690,8 +690,8 @@ TEST(RelayedPunch, ARelayAloneIsEnough) {
   fx.Start();
   p2p::RelayServer::Allocation allocation;
   ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Host a{LoopbackHost()};
-  p2p::Host b{LoopbackHost()};
+  p2p::Agent a{LoopbackHost()};
+  p2p::Agent b{LoopbackHost()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -711,18 +711,18 @@ TEST(RelayedPunch, ARelayAloneIsEnough) {
 
 TEST(RelayedPunch, AMissingTokenIsRefusedUpFront) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Host host{LoopbackHost()};
-  ASSERT_EQ(host.Start(), Result::Success);
+  p2p::Agent agent{LoopbackHost()};
+  ASSERT_EQ(agent.Start(), Result::Success);
   PunchOutcome outcome;
   // a broker that forgot the token: the relay would never bind it, so the
   // punch says so now instead of timing out later
-  host.Punch(OfferOf({Relayed(InetAddress::from("127.0.0.1", 40000), 0)}, 25,
+  agent.Punch(OfferOf({Relayed(InetAddress::from("127.0.0.1", 40000), 0)}, 25,
                      true, std::chrono::seconds(5),
                      std::chrono::milliseconds(0)),
              outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 1000));
   EXPECT_EQ(outcome.result, Result::InvalidArgument);
-  host.Stop();
+  agent.Stop();
 }
 
 TEST(RelayedPunch, AWrongTokenLeavesOnlyTheDirectPath) {
@@ -731,8 +731,8 @@ TEST(RelayedPunch, AWrongTokenLeavesOnlyTheDirectPath) {
   fx.Start();
   p2p::RelayServer::Allocation allocation;
   ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Host a{LoopbackHost()};
-  p2p::Host b{LoopbackHost()};
+  p2p::Agent a{LoopbackHost()};
+  p2p::Agent b{LoopbackHost()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
