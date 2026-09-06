@@ -150,16 +150,19 @@ Buffer WritePathMessage(ZDTOfflineMsg id, const ZDTPathMessage& msg) {
   Buffer out(Endianness::BigEndian);
   WriteOfflineHeader(out, id);
   out.WriteInt<uint64_t>(msg.cid);
-  out.WriteInt<uint64_t>(msg.nonce);
+  out.WriteInt<uint32_t>(msg.epoch);
+  out.Write(msg.cookie.data(), msg.cookie.size());
   return out;
 }
 
 bool ReadPathMessage(Buffer& buffer, ZDTPathMessage& out) {
-  if (buffer.readable_bytes() < 2 * sizeof(uint64_t)) {
+  if (buffer.readable_bytes() <
+      sizeof(uint64_t) + sizeof(uint32_t) + kZDTCookieLen) {
     return false;
   }
   out.cid = buffer.ReadInt<uint64_t>();
-  out.nonce = buffer.ReadInt<uint64_t>();
+  out.epoch = buffer.ReadInt<uint32_t>();
+  buffer.Read(out.cookie.data(), out.cookie.size());
   return true;
 }
 

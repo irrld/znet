@@ -161,14 +161,6 @@ class ZDTServerBackend : public ServerBackend {
     ZDTTransportLayer* transport = nullptr;
   };
 
-  // a path challenge sent to a new address, awaiting its response. Migration is
-  // off by default, so this stays empty unless enable_connection_migration.
-  struct PendingPath {
-    uint64_t cid = 0;
-    uint64_t nonce = 0;
-    std::chrono::steady_clock::time_point expiry;
-  };
-
   // body of the receive thread: blocks in recvfrom and routes each datagram as
   // it lands. Online -> the matching peer's inbox; offline -> the stateless
   // handshake path (which may create a session and push it onto
@@ -230,9 +222,6 @@ class ZDTServerBackend : public ServerBackend {
   std::atomic_bool receiving_{false};
 
   std::unordered_map<std::string, Route> routes_;
-  // keyed by the candidate new address; capped so a spoofed-source flood of
-  // challenges cannot grow it without bound
-  std::unordered_map<std::string, PendingPath> pending_paths_;
   std::deque<std::shared_ptr<PeerSession>> pending_accept_;
   std::unordered_map<std::string, SourceRate> source_rate_;
 

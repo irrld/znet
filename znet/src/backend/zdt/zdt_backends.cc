@@ -520,6 +520,13 @@ void ZDTServerBackend::MaybeRotateSecret() {
 
 ZDTCookie ZDTServerBackend::CookieFor(const std::string& peer_readable,
                                       uint32_t epoch) const {
+  // pick the secret that `epoch` was minted under: the previous one only across
+  // a single rotation, so a cookie issued just before a rotation still verifies.
+  // any other epoch falls through to the current secret and simply fails to match.
+  if (epoch != epoch_ && has_previous_secret_ && epoch == epoch_ - 1) {
+    return ComputeCookie(secret_previous_.data(), secret_previous_.size(),
+                         peer_readable, epoch);
+  }
   return ComputeCookie(secret_current_.data(), secret_current_.size(),
                        peer_readable, epoch);
 }
@@ -629,15 +636,7 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
     uint64_t client_guid = buffer.ReadInt<uint64_t>();
 
     // validate the cookie against the source address (return-routability).
-    bool valid = false;
-    if (epoch == epoch_) {
-      valid = ConstTimeEqual(cookie, CookieFor(key, epoch));
-    } else if (has_previous_secret_ && epoch == epoch_ - 1) {
-      valid = ConstTimeEqual(
-          cookie, ComputeCookie(secret_previous_.data(),
-                                secret_previous_.size(), key, epoch));
-    }
-    if (!valid) {
+    if (!ConstTimeEqual(cookie, CookieFor(key, epoch))) {
       ZNET_METRIC(metrics_.zdt.cookies_rejected++);
       // silent drop: never reply to an unvalidated address.
       return;
@@ -699,6 +698,14 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
   }
 }
 
+// the cookie key for path validation: the candidate address bound to the cid,
+// domain-separated from a plain handshake key (a readable address never starts
+// with this prefix) so a handshake cookie can never stand in for a path one.
+static std::string PathCookieKey(const std::string& peer_readable,
+                                 uint64_t cid) {
+  return "path|" + peer_readable + "|" + std::to_string(cid);
+}
+
 void ZDTServerBackend::ChallengeNewPath(
     uint64_t cid, const std::shared_ptr<InetAddress>& from) {
   // a live session must own this cid, or the path is not worth a challenge
@@ -712,44 +719,29 @@ void ZDTServerBackend::ChallengeNewPath(
   if (!known) {
     return;
   }
-  // prune expired challenges, then cap against a spoofed-source flood
-  const auto now = steady_clock::now();
-  for (auto it = pending_paths_.begin(); it != pending_paths_.end();) {
-    if (it->second.expiry <= now) {
-      it = pending_paths_.erase(it);
-    } else {
-      ++it;
-    }
-  }
-  const std::string key = from->readable();
-  constexpr size_t kMaxPendingPaths = 256;
-  if (pending_paths_.size() >= kMaxPendingPaths &&
-      pending_paths_.find(key) == pending_paths_.end()) {
-    return;
-  }
-  PendingPath pending;
-  pending.cid = cid;
-  pending.nonce = GenerateGuid();
-  pending.expiry = now + std::chrono::seconds(5);
-  pending_paths_[key] = pending;
-
-  Buffer out = WritePathMessage(ZDTOfflineMsg::PathChallenge,
-                                ZDTPathMessage{cid, pending.nonce});
+  // stateless: the cookie binds this address and cid, so only a host that
+  // receives there can echo it back and the server keeps nothing meanwhile. The
+  // epoch rides along so a secret rotation between challenge and response still
+  // verifies. See CompletePathMigration.
+  ZDTPathMessage msg;
+  msg.cid = cid;
+  msg.epoch = epoch_;
+  msg.cookie = CookieFor(PathCookieKey(from->readable(), cid), epoch_);
+  Buffer out = WritePathMessage(ZDTOfflineMsg::PathChallenge, msg);
   socket_->SendTo(*from, out.data(), out.size());
 }
 
 void ZDTServerBackend::CompletePathMigration(
     const std::shared_ptr<InetAddress>& from, const ZDTPathMessage& response) {
   const std::string new_key = from->readable();
-  auto pending = pending_paths_.find(new_key);
-  if (pending == pending_paths_.end() ||
-      pending->second.nonce != response.nonce ||
-      pending->second.cid != response.cid ||
-      pending->second.expiry <= steady_clock::now()) {
-    return;  // no matching challenge, or it expired
+  // recompute the cookie this address and cid would have been challenged with; a
+  // match proves the response came back from the path we probed.
+  if (!ConstTimeEqual(
+          response.cookie,
+          CookieFor(PathCookieKey(new_key, response.cid), response.epoch))) {
+    return;
   }
-  const uint64_t cid = pending->second.cid;
-  pending_paths_.erase(pending);
+  const uint64_t cid = response.cid;
 
   for (auto it = routes_.begin(); it != routes_.end(); ++it) {
     if (it->second.remote_guid != cid) {

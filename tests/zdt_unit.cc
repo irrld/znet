@@ -129,7 +129,10 @@ TEST(ZDTPeekCid, RefusesADatagramTooShortForTheId) {
 TEST(ZDTPathMessage, RoundTrips) {
   ZDTPathMessage msg;
   msg.cid = 0x1122334455667788ULL;
-  msg.nonce = 0x99aabbccddeeff00ULL;
+  msg.epoch = 0x0a0b0c0d;
+  for (size_t i = 0; i < msg.cookie.size(); i++) {
+    msg.cookie[i] = static_cast<uint8_t>(0x40 + i);
+  }
   Buffer out = WritePathMessage(ZDTOfflineMsg::PathChallenge, msg);
 
   ZDTOfflineMsg id;
@@ -138,13 +141,14 @@ TEST(ZDTPathMessage, RoundTrips) {
   ZDTPathMessage parsed;
   ASSERT_TRUE(ReadPathMessage(out, parsed));
   EXPECT_EQ(parsed.cid, msg.cid);
-  EXPECT_EQ(parsed.nonce, msg.nonce);
+  EXPECT_EQ(parsed.epoch, msg.epoch);
+  EXPECT_EQ(parsed.cookie, msg.cookie);
 }
 
 TEST(ZDTPathMessage, RejectsATruncatedPayload) {
   Buffer out(Endianness::BigEndian);
   WriteOfflineHeader(out, ZDTOfflineMsg::PathResponse);
-  out.WriteInt<uint64_t>(1);  // cid only, the nonce is missing
+  out.WriteInt<uint64_t>(1);  // cid only, the epoch and cookie are missing
   ZDTOfflineMsg id;
   ASSERT_TRUE(ReadOfflineHeader(out, id));
   ZDTPathMessage parsed;

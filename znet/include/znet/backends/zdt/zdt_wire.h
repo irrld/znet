@@ -94,8 +94,8 @@ enum class ZDTOfflineMsg : uint8_t {
   Reflected = 0x0D,   // relay -> peer: nonce(8), observed address
   // connection migration: confirm a peer really moved to a new address
   // before the send target follows it. See enable_connection_migration.
-  PathChallenge = 0x0E,  // to a new address: cid(8), nonce(8)
-  PathResponse = 0x0F,   // echoed from it: cid(8), nonce(8)
+  PathChallenge = 0x0E,  // to a new address: cid(8), epoch(4), cookie(16)
+  PathResponse = 0x0F,   // echoed from it: cid(8), epoch(4), cookie(16)
 };
 
 // id(1) + magic
@@ -308,23 +308,10 @@ inline bool PeekCid(const uint8_t* data, size_t len, uint64_t& out_cid) {
   return true;
 }
 
-// PathChallenge and PathResponse share a shape: the connection id being moved
-// and a nonce that ties a response to its challenge.
-struct ZDTPathMessage {
-  uint64_t cid = 0;
-  uint64_t nonce = 0;
-};
-
-// Builds a PathChallenge or PathResponse datagram; `id` must be one of them.
-Buffer WritePathMessage(ZDTOfflineMsg id, const ZDTPathMessage& msg);
-
-// Reads the cid and nonce that follow an already-read offline header. False
-// when fewer than the two fields remain.
-bool ReadPathMessage(Buffer& buffer, ZDTPathMessage& out);
-
 // --- Return-routability cookie ------------------------------------------------
 // server issues HMAC(secret[epoch], addr, epoch) in Reply1 holding no state, and
-// only allocates a session once the client echoes it back in Request2.
+// only allocates a session once the client echoes it back in Request2. Path
+// validation reuses the same primitive, keyed on the new address and cid.
 ZNET_INLINE_CONSTEXPR size_t kZDTCookieLen = 16;
 using ZDTCookie = std::array<uint8_t, kZDTCookieLen>;
 
@@ -334,6 +321,23 @@ ZDTCookie ComputeCookie(const uint8_t* secret, size_t secret_len,
 bool ConstTimeEqual(const ZDTCookie& a, const ZDTCookie& b);
 // 64-bit random peer identifier (OpenSSL RAND_bytes).
 uint64_t GenerateGuid();
+
+// PathChallenge and PathResponse share a shape: the connection id being moved,
+// the epoch its cookie was minted under, and a stateless return-routability
+// cookie. The client echoes a challenge back verbatim; the server keeps no
+// per-challenge state, recomputing the cookie to verify the response.
+struct ZDTPathMessage {
+  uint64_t cid = 0;
+  uint32_t epoch = 0;
+  ZDTCookie cookie{};
+};
+
+// Builds a PathChallenge or PathResponse datagram; `id` must be one of them.
+Buffer WritePathMessage(ZDTOfflineMsg id, const ZDTPathMessage& msg);
+
+// Reads the fields that follow an already-read offline header. False when fewer
+// than all of them remain.
+bool ReadPathMessage(Buffer& buffer, ZDTPathMessage& out);
 
 // 16-bit sequence comparison that tolerates wraparound. Inline here rather than
 // file-local, because both the ack encoder and the ack parser need them and
