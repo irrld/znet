@@ -120,7 +120,7 @@ class Agent {
    * Host candidates come straight off the interfaces at punch_port().
    * Reflexive ones take a round trip: a Reflect goes to each reflector and
    * the answer names the public mapping it saw. A reflector is a
-   * RelayServer's address, speaking znet's own probe, not a STUN server.
+   * TraversalServer's address, speaking znet's own probe, not a STUN server.
    * Two reflectors that report different mappings expose a symmetric NAT;
    * both are offered and the punch races them.
    *

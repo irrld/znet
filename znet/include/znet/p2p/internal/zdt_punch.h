@@ -42,7 +42,7 @@ Buffer BuildPunch();
 Buffer BuildRequest1(uint64_t local_guid, uint8_t capabilities);
 Buffer BuildReply2(uint64_t local_guid, uint16_t mtu, uint8_t capabilities);
 Buffer BuildIncompatibleVersion(uint64_t local_guid);
-// the relay and reflector side; see znet/p2p/relay_server.h for the flow
+// the relay and reflector side; see znet/p2p/traversal_server.h for the flow
 Buffer BuildRelayBind(uint64_t token);
 Buffer BuildRelayBound(uint64_t token, uint32_t channel);
 Buffer BuildReflect(uint64_t nonce);

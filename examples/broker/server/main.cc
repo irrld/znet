@@ -19,7 +19,7 @@
 
 #include "znet/codec.h"
 #include "znet/init.h"
-#include "znet/p2p/relay_server.h"
+#include "znet/p2p/traversal_server.h"
 #include "znet/packet_handler.h"
 #include "znet/peer_session.h"
 #include "znet/server.h"
@@ -38,8 +38,8 @@ struct Waiting {
   std::shared_ptr<PeerSession> session;
 };
 
-std::unique_ptr<p2p::RelayServer> relay_;
-std::shared_ptr<InetAddress> relay_endpoint_;  // as peers reach it
+std::unique_ptr<p2p::TraversalServer> traversal_;
+std::shared_ptr<InetAddress> traversal_endpoint_;  // as peers reach it
 std::mutex mutex_;
 std::unique_ptr<Waiting> waiting_;  // the peer without a partner yet
 std::mt19937_64 punch_ids_{std::random_device{}()};
@@ -62,10 +62,10 @@ void Pair(const Waiting& x, const Waiting& y) {
   // direct candidates and lets the punch try its luck
   p2p::Candidate relayed;
   const p2p::Candidate* relayed_ptr = nullptr;
-  p2p::RelayServer::Allocation allocation;
-  if (relay_ && relay_->Allocate(allocation) == Result::Success) {
+  p2p::Relay::Allocation allocation;
+  if (traversal_ && traversal_->relay()->Allocate(allocation) == Result::Success) {
     relayed.type = p2p::CandidateType::Relayed;
-    relayed.address = relay_endpoint_;
+    relayed.address = traversal_endpoint_;
     relayed.relay_token = allocation.token;
     relayed_ptr = &relayed;
   }
@@ -77,7 +77,7 @@ void Pair(const Waiting& x, const Waiting& y) {
                 punch_id, relayed_ptr ? "yes" : "no");
   // the pairing frees itself once the peers stop using it, or never bind it;
   // a broker that learns the game ended earlier calls
-  // relay_->Free(allocation.channel)
+  // traversal_->relay()->Free(allocation.channel)
 }
 
 class BrokerHandler : public PacketHandler<BrokerHandler, HelloPacket> {
@@ -134,9 +134,10 @@ int main(int argc, char* argv[]) {
        cxxopts::value<std::string>()->default_value("0.0.0.0"))
       ("p,port", "Broker port",
        cxxopts::value<uint16_t>()->default_value("5100"))
-      ("relay-host", "Host peers reach the relay at",
+      ("relay-host", "Host peers reach the traversal server at",
        cxxopts::value<std::string>()->default_value("127.0.0.1"))
-      ("relay-port", "The relay's one UDP port; 0 runs without a relay",
+      ("relay-port",
+       "The traversal server's one UDP port (reflect + relay); 0 runs without",
        cxxopts::value<uint16_t>()->default_value("5102"))
       ("h,help", "Print usage");
   auto parsed = opts.parse(argc, argv);
@@ -154,15 +155,16 @@ int main(int argc, char* argv[]) {
   const uint16_t relay_port = parsed["relay-port"].as<uint16_t>();
   if (relay_port != 0) {
     // the same port answers reflections, so peers gather against it too
-    p2p::RelayServerConfig config;
+    p2p::TraversalServerConfig config;
     config.bind_address = parsed["target"].as<std::string>();
     config.port = relay_port;
-    relay_.reset(new p2p::RelayServer(config));
-    if ((result = relay_->Start()) != Result::Success) {
-      ZNET_LOG_ERROR("Relay failed to start: {}", GetResultString(result));
+    traversal_.reset(new p2p::TraversalServer(config));
+    if ((result = traversal_->Start()) != Result::Success) {
+      ZNET_LOG_ERROR("Traversal server failed to start: {}",
+                     GetResultString(result));
       return 1;
     }
-    relay_endpoint_ =
+    traversal_endpoint_ =
         InetAddress::from(parsed["relay-host"].as<std::string>(), relay_port);
   }
 
@@ -183,8 +185,8 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   server.Wait();
-  if (relay_) {
-    relay_->Stop();
+  if (traversal_) {
+    traversal_->Stop();
   }
   Cleanup();
   return 0;

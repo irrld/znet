@@ -73,11 +73,11 @@ target_link_libraries(znet-tests-gather PRIVATE gtest_main znet)
 
 add_test(NAME gather-tests COMMAND znet-tests-gather)
 
-add_executable(znet-tests-relay relay.cc)
-znet_apply_cxx_standard(znet-tests-relay)
-target_link_libraries(znet-tests-relay PRIVATE gtest_main znet)
+add_executable(znet-tests-traversal traversal.cc)
+znet_apply_cxx_standard(znet-tests-traversal)
+target_link_libraries(znet-tests-traversal PRIVATE gtest_main znet)
 
-add_test(NAME relay-tests COMMAND znet-tests-relay)
+add_test(NAME traversal-tests COMMAND znet-tests-traversal)
 
 add_executable(znet-tests-locator locator.cc)
 znet_apply_cxx_standard(znet-tests-locator)

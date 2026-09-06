@@ -44,14 +44,14 @@ int main(int argc, char* argv[]) {
   config.bind_address = result["target"].as<std::string>();
   config.punch_connection_type = conn == "tcp" ? znet::ConnectionType::TCP
                                                : znet::ConnectionType::ZDT;
-  config.relay_enabled = result["relay"].as<bool>();
-  config.relay_host = result["relay-host"].as<std::string>();
-  config.relay.bind_address = config.bind_address;
-  config.relay.port = result["relay-port"].as<uint16_t>();
+  config.traversal_enabled = result["relay"].as<bool>();
+  config.traversal_host = result["relay-host"].as<std::string>();
+  config.traversal.bind_address = config.bind_address;
+  config.traversal.port = result["relay-port"].as<uint16_t>();
   ZNET_LOG_INFO("Starting rendezvous on {}:{}... (punch type: {}, relay: {})",
                 config.bind_address, config.bind_port,
                 conn == "tcp" ? "tcp" : "zdt",
-                config.relay_enabled ? "on" : "off");
+                config.traversal_enabled ? "on" : "off");
 
   znet::p2p::RendezvousServer rendezvous{config};
   if (rendezvous.Start() != znet::Result::Success) {

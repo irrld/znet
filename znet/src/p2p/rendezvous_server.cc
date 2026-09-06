@@ -101,25 +101,25 @@ RendezvousServer::~RendezvousServer() {
 }
 
 Result RendezvousServer::Start() {
-  if (config_.relay_enabled) {
+  if (config_.traversal_enabled) {
     // resolved here, once: a hostname costs a lookup, and a name that does
     // not resolve is a configuration error to refuse now rather than a null
     // to trip over on the first client
-    relay_host_ = InetAddress::from(
-        config_.relay_host.empty() ? "0.0.0.0" : config_.relay_host, 0);
-    if (!relay_host_ || !relay_host_->is_valid() ||
-        relay_host_->ipv() == InetProtocolVersion::Unix) {
-      ZNET_LOG_ERROR("Rendezvous: relay_host \"{}\" does not resolve",
-                     config_.relay_host);
-      relay_host_ = nullptr;
+    traversal_host_ = InetAddress::from(
+        config_.traversal_host.empty() ? "0.0.0.0" : config_.traversal_host, 0);
+    if (!traversal_host_ || !traversal_host_->is_valid() ||
+        traversal_host_->ipv() == InetProtocolVersion::Unix) {
+      ZNET_LOG_ERROR("Rendezvous: traversal_host \"{}\" does not resolve",
+                     config_.traversal_host);
+      traversal_host_ = nullptr;
       return Result::InvalidAddress;
     }
-    relay_.reset(new RelayServer(config_.relay));
-    const Result result = relay_->Start();
+    traversal_ = std::make_unique<TraversalServer>(config_.traversal);
+    const Result result = traversal_->Start();
     if (result != Result::Success) {
-      ZNET_LOG_ERROR("Rendezvous: the relay failed to start: {}",
+      ZNET_LOG_ERROR("Rendezvous: the traversal server failed to start: {}",
                      GetResultString(result));
-      relay_ = nullptr;
+      traversal_ = nullptr;
       return result;
     }
   }
@@ -128,9 +128,9 @@ Result RendezvousServer::Start() {
     result = server_.Listen();
   }
   if (result != Result::Success) {
-    if (relay_) {
-      relay_->Stop();  // no listener, so nothing will ever allocate on it
-      relay_ = nullptr;
+    if (traversal_) {
+      traversal_->Stop();  // no listener, so nothing will ever allocate on it
+      traversal_ = nullptr;
     }
     return result;
   }
@@ -149,8 +149,8 @@ void RendezvousServer::Stop() {
   }
   cv_.notify_all();
   server_.Stop();
-  if (relay_) {
-    relay_->Stop();
+  if (traversal_) {
+    traversal_->Stop();
   }
 }
 
@@ -260,9 +260,9 @@ bool RendezvousServer::AllowRequest(ClientData& data) {
   return false;
 }
 
-std::shared_ptr<InetAddress> RendezvousServer::RelayEndpoint(
+std::shared_ptr<InetAddress> RendezvousServer::TraversalEndpoint(
     PortNumber port) const {
-  return std::shared_ptr<InetAddress>(relay_host_->WithPort(port));
+  return std::shared_ptr<InetAddress>(traversal_host_->WithPort(port));
 }
 
 void RendezvousServer::Welcome(const std::shared_ptr<PeerSession>& session) {
@@ -286,9 +286,9 @@ void RendezvousServer::Welcome(const std::shared_ptr<PeerSession>& session) {
   welcome->peer_name_ = data->peer_name;
   welcome->endpoint_ = session->remote_address();
   welcome->connection_type_ = config_.punch_connection_type;
-  if (relay_ && relay_->address()) {
+  if (traversal_ && traversal_->reflector() && traversal_->address()) {
     welcome->reflectors_.push_back(
-        RelayEndpoint(relay_->address()->port()));
+        TraversalEndpoint(traversal_->address()->port()));
   }
   // a distinct-IP second reflector is what makes the NAT-type verdict possible
   for (const auto& reflector : config_.extra_reflectors) {
@@ -396,12 +396,13 @@ void RendezvousServer::TryPair(const std::shared_ptr<PeerSession>& session,
   // can use it
   Candidate relayed;
   const Candidate* relayed_ptr = nullptr;
-  if (relay_ && config_.punch_connection_type == ConnectionType::ZDT) {
-    RelayServer::Allocation allocation;
-    const Result result = relay_->Allocate(allocation);
+  Relay* relay = traversal_ ? traversal_->relay() : nullptr;
+  if (relay && config_.punch_connection_type == ConnectionType::ZDT) {
+    Relay::Allocation allocation;
+    const Result result = relay->Allocate(allocation);
     if (result == Result::Success) {
       relayed.type = CandidateType::Relayed;
-      relayed.address = RelayEndpoint(relay_->address()->port());
+      relayed.address = TraversalEndpoint(traversal_->address()->port());
       relayed.relay_token = allocation.token;
       relayed_ptr = &relayed;
     } else {

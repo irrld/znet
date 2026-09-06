@@ -9,9 +9,9 @@
 //
 
 //
-// The relay server on its own, spoken to by raw UDP sockets: binding,
-// forwarding by channel, what it refuses, when it frees a pairing, and the
-// reflector on the same port.
+// The traversal server, spoken to by raw UDP sockets: the relay half (binding,
+// forwarding by channel, what it refuses, when it frees a pairing) and the
+// reflector half, both on the same port.
 //
 
 #include "p2p_probes.h"
@@ -20,7 +20,7 @@
 #include "znet/init.h"
 #include "znet/p2p/agent.h"
 #include "znet/p2p/internal/zdt_punch.h"
-#include "znet/p2p/relay_server.h"
+#include "znet/p2p/traversal_server.h"
 
 #include <gtest/gtest.h>
 
@@ -40,7 +40,7 @@ using znet::test::WaitUntil;
 
 namespace {
 
-// one raw peer of the relay: a loopback UDP socket with a receive timeout
+// one raw peer of the traversal server: a loopback UDP socket with a timeout
 struct RawPeer {
   UDPSocket socket;
   std::shared_ptr<InetAddress> address;
@@ -107,31 +107,33 @@ struct RawPeer {
   }
 };
 
-struct RelayFixture {
-  p2p::RelayServerConfig config;
-  std::unique_ptr<p2p::RelayServer> relay;
+struct TraversalFixture {
+  p2p::TraversalServerConfig config;
+  std::unique_ptr<p2p::TraversalServer> server;
 
-  RelayFixture() {
+  TraversalFixture() {
     config.bind_address = "127.0.0.1";
     config.port = 0;
   }
 
   void Start() {
-    relay.reset(new p2p::RelayServer(config));
-    ASSERT_EQ(relay->Start(), Result::Success);
+    server.reset(new p2p::TraversalServer(config));
+    ASSERT_EQ(server->Start(), Result::Success);
   }
 
-  const InetAddress& At() { return *relay->address(); }
+  const InetAddress& At() { return *server->address(); }
+  p2p::Relay& relay() { return *server->relay(); }
+  p2p::Reflector& reflector() { return *server->reflector(); }
 };
 
 }  // namespace
 
-TEST(RelayServer, ForwardsBetweenTwoBoundPeers) {
+TEST(Relay, ForwardsBetweenTwoBoundPeers) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
   EXPECT_NE(allocation.channel, 0u);
   EXPECT_NE(allocation.token, 0u);
 
@@ -148,20 +150,20 @@ TEST(RelayServer, ForwardsBetweenTwoBoundPeers) {
   b.Send(fx.At(), "from b");
   EXPECT_EQ(a.Receive(), "from b");
 
-  const p2p::RelayMetrics metrics = fx.relay->metrics();
+  const p2p::RelayMetrics metrics = fx.relay().metrics();
   EXPECT_EQ(metrics.allocations_active, 1u);
   EXPECT_EQ(metrics.binds_accepted, 2u);
   EXPECT_EQ(metrics.datagrams_relayed, 2u);
   EXPECT_EQ(metrics.bytes_relayed, 2 * (kZDTRelayHeaderSize + 6));
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
-TEST(RelayServer, ABindIsAnsweredAgainButNeverForwarded) {
+TEST(Relay, ABindIsAnsweredAgainButNeverForwarded) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
 
   RawPeer a;
   RawPeer b;
@@ -170,16 +172,16 @@ TEST(RelayServer, ABindIsAnsweredAgainButNeverForwarded) {
   // a lost RelayBound is covered by binding again
   ASSERT_TRUE(a.Bind(fx.At(), allocation.token));
   EXPECT_TRUE(b.Receive().empty()) << "a bind must never reach the peer";
-  EXPECT_EQ(fx.relay->metrics().datagrams_relayed, 0u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.relay().metrics().datagrams_relayed, 0u);
+  fx.server->Stop();
 }
 
-TEST(RelayServer, DropsWhatAnUnboundSourceSends) {
+TEST(Relay, DropsWhatAnUnboundSourceSends) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
 
   RawPeer a;
   RawPeer b;
@@ -192,16 +194,16 @@ TEST(RelayServer, DropsWhatAnUnboundSourceSends) {
   EXPECT_TRUE(a.Receive().empty());
   EXPECT_TRUE(b.Receive().empty());
   EXPECT_TRUE(WaitUntil(
-      [&]() { return fx.relay->metrics().datagrams_dropped >= 1; }, 1000));
-  fx.relay->Stop();
+      [&]() { return fx.relay().metrics().datagrams_dropped >= 1; }, 1000));
+  fx.server->Stop();
 }
 
-TEST(RelayServer, DropsAnUnknownChannelAndABareDatagram) {
+TEST(Relay, DropsAnUnknownChannelAndABareDatagram) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
 
   RawPeer a;
   RawPeer b;
@@ -219,17 +221,17 @@ TEST(RelayServer, DropsAnUnknownChannelAndABareDatagram) {
   a.channel = bound;
   a.Send(fx.At(), "wrapped");
   EXPECT_EQ(b.Receive(), "wrapped");
-  EXPECT_EQ(fx.relay->metrics().datagrams_dropped, 2u);
-  EXPECT_EQ(fx.relay->metrics().datagrams_relayed, 1u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.relay().metrics().datagrams_dropped, 2u);
+  EXPECT_EQ(fx.relay().metrics().datagrams_relayed, 1u);
+  fx.server->Stop();
 }
 
-TEST(RelayServer, HoldsTrafficUntilTheOtherSideBinds) {
+TEST(Relay, HoldsTrafficUntilTheOtherSideBinds) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
 
   RawPeer a;
   RawPeer b;
@@ -239,16 +241,16 @@ TEST(RelayServer, HoldsTrafficUntilTheOtherSideBinds) {
   EXPECT_TRUE(b.Receive().empty()) << "nothing is queued for a late binder";
   a.Send(fx.At(), "late");
   EXPECT_EQ(b.Receive(), "late");
-  EXPECT_EQ(fx.relay->metrics().datagrams_dropped, 1u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.relay().metrics().datagrams_dropped, 1u);
+  fx.server->Stop();
 }
 
-TEST(RelayServer, RefusesAWrongTokenAndAThirdBinder) {
+TEST(Relay, RefusesAWrongTokenAndAThirdBinder) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
 
   RawPeer a;
   RawPeer b;
@@ -261,20 +263,20 @@ TEST(RelayServer, RefusesAWrongTokenAndAThirdBinder) {
   c.Send(fx.At(), "still not a peer");
   EXPECT_TRUE(a.Receive().empty());
   EXPECT_TRUE(b.Receive().empty());
-  EXPECT_EQ(fx.relay->metrics().binds_refused, 2u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.relay().metrics().binds_refused, 2u);
+  fx.server->Stop();
 }
 
-TEST(RelayServer, KeepsPairingsOnOnePortApart) {
+TEST(Relay, KeepsPairingsOnOnePortApart) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
   // three pairings, six peers, one port
-  p2p::RelayServer::Allocation allocations[3];
+  p2p::Relay::Allocation allocations[3];
   RawPeer a[3];
   RawPeer b[3];
   for (int i = 0; i < 3; i++) {
-    ASSERT_EQ(fx.relay->Allocate(allocations[i]), Result::Success);
+    ASSERT_EQ(fx.relay().Allocate(allocations[i]), Result::Success);
     ASSERT_TRUE(a[i].Bind(fx.At(), allocations[i].token));
     ASSERT_TRUE(b[i].Bind(fx.At(), allocations[i].token));
   }
@@ -289,37 +291,37 @@ TEST(RelayServer, KeepsPairingsOnOnePortApart) {
   a[0].channel = allocations[1].channel;
   a[0].Send(fx.At(), "crossing");
   EXPECT_TRUE(b[1].Receive().empty());
-  EXPECT_EQ(fx.relay->allocation_count(), 3u);
-  EXPECT_EQ(fx.relay->metrics().datagrams_dropped, 1u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.relay().allocation_count(), 3u);
+  EXPECT_EQ(fx.relay().metrics().datagrams_dropped, 1u);
+  fx.server->Stop();
 }
 
-TEST(RelayServer, FreesAnAllocationNobodyBinds) {
+TEST(Relay, FreesAnAllocationNobodyBinds) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
-  fx.config.bind_timeout = std::chrono::milliseconds(200);
+  TraversalFixture fx;
+  fx.config.relay.bind_timeout = std::chrono::milliseconds(200);
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
   // one side alone does not keep it: the pairing never formed
   RawPeer a;
   ASSERT_TRUE(a.Bind(fx.At(), allocation.token));
-  EXPECT_EQ(fx.relay->allocation_count(), 1u);
-  EXPECT_TRUE(WaitUntil([&]() { return fx.relay->allocation_count() == 0; },
+  EXPECT_EQ(fx.relay().allocation_count(), 1u);
+  EXPECT_TRUE(WaitUntil([&]() { return fx.relay().allocation_count() == 0; },
                         2000));
-  EXPECT_EQ(fx.relay->metrics().allocations_expired, 1u);
+  EXPECT_EQ(fx.relay().metrics().allocations_expired, 1u);
   EXPECT_FALSE(a.Bind(fx.At(), allocation.token)) << "the token is gone";
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
-TEST(RelayServer, FreesAnIdlePairing) {
+TEST(Relay, FreesAnIdlePairing) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
-  fx.config.idle_timeout = std::chrono::milliseconds(300);
-  fx.config.bind_timeout = std::chrono::milliseconds(5000);
+  TraversalFixture fx;
+  fx.config.relay.idle_timeout = std::chrono::milliseconds(300);
+  fx.config.relay.bind_timeout = std::chrono::milliseconds(5000);
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
 
   RawPeer a;
   RawPeer b;
@@ -331,52 +333,55 @@ TEST(RelayServer, FreesAnIdlePairing) {
     a.Send(fx.At(), "tick");
     EXPECT_EQ(b.Receive(), "tick");
   }
-  EXPECT_EQ(fx.relay->allocation_count(), 1u);
+  EXPECT_EQ(fx.relay().allocation_count(), 1u);
   // silence does not
-  EXPECT_TRUE(WaitUntil([&]() { return fx.relay->allocation_count() == 0; },
+  EXPECT_TRUE(WaitUntil([&]() { return fx.relay().allocation_count() == 0; },
                         2000));
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
-TEST(RelayServer, HonorsTheAllocationCap) {
+TEST(Relay, HonorsTheAllocationCap) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
-  fx.config.max_allocations = 2;
+  TraversalFixture fx;
+  fx.config.relay.max_allocations = 2;
   fx.Start();
-  p2p::RelayServer::Allocation first;
-  p2p::RelayServer::Allocation second;
-  p2p::RelayServer::Allocation third;
-  EXPECT_EQ(fx.relay->Allocate(first), Result::Success);
-  EXPECT_EQ(fx.relay->Allocate(second), Result::Success);
-  EXPECT_EQ(fx.relay->Allocate(third), Result::ServerFull);
+  p2p::Relay::Allocation first;
+  p2p::Relay::Allocation second;
+  p2p::Relay::Allocation third;
+  EXPECT_EQ(fx.relay().Allocate(first), Result::Success);
+  EXPECT_EQ(fx.relay().Allocate(second), Result::Success);
+  EXPECT_EQ(fx.relay().Allocate(third), Result::ServerFull);
   EXPECT_NE(first.channel, second.channel);
   EXPECT_NE(first.token, second.token);
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
-TEST(RelayServer, FreeReleasesAnAllocationAtOnce) {
+TEST(Relay, FreeReleasesAnAllocationAtOnce) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
   RawPeer a;
   ASSERT_TRUE(a.Bind(fx.At(), allocation.token));
   // a broker that knows the pairing is over need not wait for the timers
-  EXPECT_EQ(fx.relay->Free(allocation.channel), Result::Success);
-  EXPECT_EQ(fx.relay->allocation_count(), 0u);
+  EXPECT_EQ(fx.relay().Free(allocation.channel), Result::Success);
+  EXPECT_EQ(fx.relay().allocation_count(), 0u);
   EXPECT_FALSE(a.Bind(fx.At(), allocation.token)) << "the token is gone";
-  EXPECT_EQ(fx.relay->Free(allocation.channel), Result::PeerNotFound);
-  EXPECT_EQ(fx.relay->metrics().allocations_expired, 1u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.relay().Free(allocation.channel), Result::PeerNotFound);
+  EXPECT_EQ(fx.relay().metrics().allocations_expired, 1u);
+  fx.server->Stop();
 }
 
-TEST(RelayServer, RefusesToAllocateBeforeStart) {
+TEST(Relay, RefusesToAllocateBeforeStart) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::RelayServerConfig config;
-  p2p::RelayServer relay{config};
-  p2p::RelayServer::Allocation allocation;
-  EXPECT_EQ(relay.Allocate(allocation), Result::AlreadyStopped);
+  p2p::TraversalServerConfig config;
+  p2p::TraversalServer server{config};
+  // the relay half exists before Start, but does not hand out tokens that no
+  // bound socket could ever reach
+  ASSERT_NE(server.relay(), nullptr);
+  p2p::Relay::Allocation allocation;
+  EXPECT_EQ(server.relay()->Allocate(allocation), Result::AlreadyStopped);
 }
 
 // --- The reflector ------------------------------------------------------------
@@ -399,11 +404,11 @@ std::shared_ptr<InetAddress> Reflected(const std::string& reply,
 
 }  // namespace
 
-TEST(RelayReflector, AnswersWithTheObservedAddress) {
+TEST(Reflector, AnswersWithTheObservedAddress) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  ASSERT_TRUE(fx.relay->address());
+  ASSERT_TRUE(fx.server->address());
   ASSERT_NE(fx.At().port(), 0);
 
   RawPeer a;
@@ -412,13 +417,13 @@ TEST(RelayReflector, AnswersWithTheObservedAddress) {
   auto observed = Reflected(a.Receive(), nonce);
   ASSERT_TRUE(observed);
   EXPECT_EQ(observed->readable(), a.address->readable());
-  EXPECT_EQ(fx.relay->metrics().probes_answered, 1u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.reflector().metrics().probes_answered, 1u);
+  fx.server->Stop();
 }
 
-TEST(RelayReflector, IgnoresAShortProbe) {
+TEST(Reflector, IgnoresAShortProbe) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
 
   // the header and nonce without the padding: an answer would be larger
@@ -429,15 +434,15 @@ TEST(RelayReflector, IgnoresAShortProbe) {
   ASSERT_LT(probe.size(), kZDTReflectSize);
   a.SendBare(fx.At(), probe);
   EXPECT_TRUE(a.Receive().empty());
-  EXPECT_EQ(fx.relay->metrics().probes_refused, 1u);
-  EXPECT_EQ(fx.relay->metrics().probes_answered, 0u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.reflector().metrics().probes_refused, 1u);
+  EXPECT_EQ(fx.reflector().metrics().probes_answered, 0u);
+  fx.server->Stop();
 }
 
-TEST(RelayReflector, ThrottlesOneSource) {
+TEST(Reflector, ThrottlesOneSource) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
-  fx.config.max_probes_per_source = 3;
+  TraversalFixture fx;
+  fx.config.reflector.max_probes_per_source = 3;
   fx.Start();
 
   RawPeer a;
@@ -449,11 +454,11 @@ TEST(RelayReflector, ThrottlesOneSource) {
     }
   }
   EXPECT_EQ(answered, 3);
-  EXPECT_EQ(fx.relay->metrics().probes_refused, 3u);
-  fx.relay->Stop();
+  EXPECT_EQ(fx.reflector().metrics().probes_refused, 3u);
+  fx.server->Stop();
 }
 
-TEST(RelayReflector, ProbesCannotAmplify) {
+TEST(Reflector, ProbesCannotAmplify) {
   // the padded request is at least as large as any answer it can draw, IPv6
   // included: header, nonce, and a 19-byte address
   Buffer probe = p2p::internal::BuildReflect(1);
@@ -504,7 +509,7 @@ std::shared_ptr<InetAddress> HostAddr(const p2p::Agent& agent) {
   return InetAddress::from("127.0.0.1", agent.punch_port());
 }
 
-p2p::AgentConfig LoopbackHost() {
+p2p::AgentConfig LoopbackAgent() {
   p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
   return config;
@@ -535,12 +540,12 @@ void ExchangeNote(const std::shared_ptr<PeerSession>& from,
 
 TEST(RelayedPunch, ConnectsThroughTheRelayWhenDirectFails) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Agent a{LoopbackHost()};
-  p2p::Agent b{LoopbackHost()};
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
+  p2p::Agent a{LoopbackAgent()};
+  p2p::Agent b{LoopbackAgent()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
@@ -550,7 +555,7 @@ TEST(RelayedPunch, ConnectsThroughTheRelayWhenDirectFails) {
   PunchOutcome at_a;
   PunchOutcome at_b;
   const auto started = std::chrono::steady_clock::now();
-  const auto relay = fx.relay->address();
+  const auto relay = fx.server->address();
   PunchBoth(a,
             OfferOf({Direct(Dead()), Relayed(relay, allocation.token)}, 21,
                     true, budget, relay_delay),
@@ -576,34 +581,34 @@ TEST(RelayedPunch, ConnectsThroughTheRelayWhenDirectFails) {
   at_b.Session()->SetHandler(to_b);
   ExchangeNote(at_a.Session(), to_b, "through the relay");
   ExchangeNote(at_b.Session(), to_a, "and back");
-  const p2p::RelayMetrics metrics = fx.relay->metrics();
+  const p2p::RelayMetrics metrics = fx.relay().metrics();
   EXPECT_EQ(metrics.binds_accepted, 2u);
   EXPECT_GT(metrics.datagrams_relayed, 4u);
   a.Stop();
   b.Stop();
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
 // two relayed sessions on one agent share the relay's address and are told
 // apart by channel alone
-TEST(RelayedPunch, OneHostCarriesTwoRelayedPeers) {
+TEST(RelayedPunch, OneAgentCarriesTwoRelayedPeers) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation to_b;
-  p2p::RelayServer::Allocation to_c;
-  ASSERT_EQ(fx.relay->Allocate(to_b), Result::Success);
-  ASSERT_EQ(fx.relay->Allocate(to_c), Result::Success);
-  p2p::Agent a{LoopbackHost()};
-  p2p::Agent b{LoopbackHost()};
-  p2p::Agent c{LoopbackHost()};
+  p2p::Relay::Allocation to_b;
+  p2p::Relay::Allocation to_c;
+  ASSERT_EQ(fx.relay().Allocate(to_b), Result::Success);
+  ASSERT_EQ(fx.relay().Allocate(to_c), Result::Success);
+  p2p::Agent a{LoopbackAgent()};
+  p2p::Agent b{LoopbackAgent()};
+  p2p::Agent c{LoopbackAgent()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
   ASSERT_EQ(c.Start(), Result::Success);
 
   const std::chrono::milliseconds budget(10000);
   const std::chrono::milliseconds relay_delay(0);
-  const auto relay = fx.relay->address();
+  const auto relay = fx.server->address();
   PunchOutcome a_to_b;
   PunchOutcome b_to_a;
   PunchOutcome a_to_c;
@@ -644,24 +649,24 @@ TEST(RelayedPunch, OneHostCarriesTwoRelayedPeers) {
   a.Stop();
   b.Stop();
   c.Stop();
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
 TEST(RelayedPunch, DirectWinsWhenItWorks) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Agent a{LoopbackHost()};
-  p2p::Agent b{LoopbackHost()};
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
+  p2p::Agent a{LoopbackAgent()};
+  p2p::Agent b{LoopbackAgent()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
   // a relay that could carry it, but a direct path that answers first
   const std::chrono::milliseconds budget(10000);
   const std::chrono::milliseconds relay_delay(0);
-  const auto relay = fx.relay->address();
+  const auto relay = fx.server->address();
   PunchOutcome at_a;
   PunchOutcome at_b;
   PunchBoth(a,
@@ -678,26 +683,26 @@ TEST(RelayedPunch, DirectWinsWhenItWorks) {
   EXPECT_EQ(at_b.Session()->remote_address()->readable(),
             HostAddr(a)->readable());
   // both bound the relay all the same, and nothing else went through it
-  EXPECT_TRUE(WaitUntil([&]() { return fx.relay->metrics().binds_accepted == 2u; }, 2000));
+  EXPECT_TRUE(WaitUntil([&]() { return fx.relay().metrics().binds_accepted == 2u; }, 2000));
   a.Stop();
   b.Stop();
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
 TEST(RelayedPunch, ARelayAloneIsEnough) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Agent a{LoopbackHost()};
-  p2p::Agent b{LoopbackHost()};
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
+  p2p::Agent a{LoopbackAgent()};
+  p2p::Agent b{LoopbackAgent()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
   const std::chrono::milliseconds budget(10000);
   const std::chrono::milliseconds relay_delay(100);
-  const auto relay = fx.relay->address();
+  const auto relay = fx.server->address();
   PunchOutcome at_a;
   PunchOutcome at_b;
   PunchBoth(a, OfferOf({Relayed(relay, allocation.token)}, 23, true, budget, relay_delay), at_a,
@@ -706,12 +711,12 @@ TEST(RelayedPunch, ARelayAloneIsEnough) {
   EXPECT_EQ(at_b.result, Result::Success);
   a.Stop();
   b.Stop();
-  fx.relay->Stop();
+  fx.server->Stop();
 }
 
 TEST(RelayedPunch, AMissingTokenIsRefusedUpFront) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Agent agent{LoopbackHost()};
+  p2p::Agent agent{LoopbackAgent()};
   ASSERT_EQ(agent.Start(), Result::Success);
   PunchOutcome outcome;
   // a broker that forgot the token: the relay would never bind it, so the
@@ -727,27 +732,27 @@ TEST(RelayedPunch, AMissingTokenIsRefusedUpFront) {
 
 TEST(RelayedPunch, AWrongTokenLeavesOnlyTheDirectPath) {
   ASSERT_EQ(Init(), Result::Success);
-  RelayFixture fx;
+  TraversalFixture fx;
   fx.Start();
-  p2p::RelayServer::Allocation allocation;
-  ASSERT_EQ(fx.relay->Allocate(allocation), Result::Success);
-  p2p::Agent a{LoopbackHost()};
-  p2p::Agent b{LoopbackHost()};
+  p2p::Relay::Allocation allocation;
+  ASSERT_EQ(fx.relay().Allocate(allocation), Result::Success);
+  p2p::Agent a{LoopbackAgent()};
+  p2p::Agent b{LoopbackAgent()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
   const std::chrono::milliseconds budget(1500);
   const std::chrono::milliseconds relay_delay(100);
-  const auto relay = fx.relay->address();
+  const auto relay = fx.server->address();
   PunchOutcome at_a;
   PunchOutcome at_b;
   PunchBoth(a, OfferOf({Direct(Dead()), Relayed(relay, allocation.token ^ 1u)}, 24, true, budget, relay_delay), at_a,
             b, OfferOf({Direct(Dead()), Relayed(relay, allocation.token ^ 1u)}, 24, false, budget, relay_delay), at_b);
   EXPECT_EQ(at_a.result, Result::Timeout);
   EXPECT_EQ(at_b.result, Result::Timeout);
-  EXPECT_EQ(fx.relay->metrics().binds_accepted, 0u);
-  EXPECT_GE(fx.relay->metrics().binds_refused, 2u);
+  EXPECT_EQ(fx.relay().metrics().binds_accepted, 0u);
+  EXPECT_GE(fx.relay().metrics().binds_refused, 2u);
   a.Stop();
   b.Stop();
-  fx.relay->Stop();
+  fx.server->Stop();
 }

@@ -16,7 +16,7 @@
 #include "znet/p2p/agent.h"
 #include "znet/p2p/locator.h"
 #include "znet/p2p/punch.h"
-#include "znet/p2p/relay_server.h"
+#include "znet/p2p/traversal_server.h"
 #include "znet/p2p/rendezvous_server.h"
 #include "znet/p2p/tcp/locator.h"
 #include "znet/p2p/tcp/punch.h"

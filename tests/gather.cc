@@ -10,14 +10,14 @@
 
 //
 // The gather step: host candidates off the interfaces, the reflexive one off
-// a relay's control port, and a punch that runs on what was gathered.
+// a reflector's port, and a punch that runs on what was gathered.
 //
 
 #include "p2p_probes.h"
 #include "znet/init.h"
 #include "znet/p2p/agent.h"
 #include "znet/p2p/internal/gather.h"
-#include "znet/p2p/relay_server.h"
+#include "znet/p2p/traversal_server.h"
 
 #include <gtest/gtest.h>
 
@@ -35,16 +35,16 @@ using znet::test::WaitUntil;
 
 namespace {
 
-std::unique_ptr<p2p::RelayServer> StartRelay() {
-  p2p::RelayServerConfig config;
+std::unique_ptr<p2p::TraversalServer> StartTraversal() {
+  p2p::TraversalServerConfig config;
   config.bind_address = "127.0.0.1";
   config.port = 0;
-  std::unique_ptr<p2p::RelayServer> relay(new p2p::RelayServer(config));
-  EXPECT_EQ(relay->Start(), Result::Success);
-  return relay;
+  std::unique_ptr<p2p::TraversalServer> traversal(new p2p::TraversalServer(config));
+  EXPECT_EQ(traversal->Start(), Result::Success);
+  return traversal;
 }
 
-p2p::AgentConfig LoopbackHost() {
+p2p::AgentConfig LoopbackAgent() {
   p2p::AgentConfig config;
   config.bind_address = "127.0.0.1";
   return config;
@@ -72,12 +72,12 @@ TEST(LocalCandidates, EveryAddressCarriesThePort) {
 
 TEST(HostGather, LearnsThePublicMappingFromAReflector) {
   ASSERT_EQ(Init(), Result::Success);
-  auto relay = StartRelay();
-  p2p::Agent agent{LoopbackHost()};
+  auto traversal = StartTraversal();
+  p2p::Agent agent{LoopbackAgent()};
   ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
-  agent.Gather({relay->address()}, std::chrono::seconds(2),
+  agent.Gather({traversal->address()}, std::chrono::seconds(2),
               outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_EQ(outcome.result, Result::Success);
@@ -88,12 +88,12 @@ TEST(HostGather, LearnsThePublicMappingFromAReflector) {
   EXPECT_EQ(candidates.front().address->readable(),
             "127.0.0.1:" + std::to_string(agent.punch_port()));
   agent.Stop();
-  relay->Stop();
+  traversal->Stop();
 }
 
 TEST(HostGather, WithoutReflectorsReportsTheHostCandidates) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Agent agent{LoopbackHost()};
+  p2p::Agent agent{LoopbackAgent()};
   ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
@@ -110,7 +110,7 @@ TEST(HostGather, WithoutReflectorsReportsTheHostCandidates) {
 
 TEST(HostGather, ADeadReflectorTimesOutWithTheHostCandidates) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Agent agent{LoopbackHost()};
+  p2p::Agent agent{LoopbackAgent()};
   ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
@@ -129,7 +129,7 @@ TEST(HostGather, ADeadReflectorTimesOutWithTheHostCandidates) {
 
 TEST(HostGather, StoppingTheHostFailsAPendingGather) {
   ASSERT_EQ(Init(), Result::Success);
-  p2p::Agent agent{LoopbackHost()};
+  p2p::Agent agent{LoopbackAgent()};
   ASSERT_EQ(agent.Start(), Result::Success);
   GatherOutcome outcome;
   agent.Gather({InetAddress::from("203.0.113.1", 9)}, std::chrono::seconds(30),
@@ -144,17 +144,17 @@ TEST(HostGather, StoppingTheHostFailsAPendingGather) {
 // same reflector, swap what they learned, and punch on it
 TEST(HostGather, GatheredCandidatesCarryAPunch) {
   ASSERT_EQ(Init(), Result::Success);
-  auto relay = StartRelay();
-  p2p::Agent a{LoopbackHost()};
-  p2p::Agent b{LoopbackHost()};
+  auto traversal = StartTraversal();
+  p2p::Agent a{LoopbackAgent()};
+  p2p::Agent b{LoopbackAgent()};
   ASSERT_EQ(a.Start(), Result::Success);
   ASSERT_EQ(b.Start(), Result::Success);
 
   GatherOutcome gathered_a;
   GatherOutcome gathered_b;
-  a.Gather({relay->address()}, std::chrono::seconds(2),
+  a.Gather({traversal->address()}, std::chrono::seconds(2),
            gathered_a.Callback());
-  b.Gather({relay->address()}, std::chrono::seconds(2),
+  b.Gather({traversal->address()}, std::chrono::seconds(2),
            gathered_b.Callback());
   ASSERT_TRUE(WaitUntil(
       [&]() { return gathered_a.done.load() && gathered_b.done.load(); },
@@ -182,23 +182,23 @@ TEST(HostGather, GatheredCandidatesCarryAPunch) {
   EXPECT_EQ(at_b.result, Result::Success);
   a.Stop();
   b.Stop();
-  relay->Stop();
+  traversal->Stop();
 }
 
 TEST(HostGather, OneReflectorLeavesTheNatTypeUnknown) {
   ASSERT_EQ(Init(), Result::Success);
-  auto relay = StartRelay();
-  p2p::Agent agent{LoopbackHost()};
+  auto traversal = StartTraversal();
+  p2p::Agent agent{LoopbackAgent()};
   ASSERT_EQ(agent.Start(), Result::Success);
 
   GatherOutcome outcome;
-  agent.Gather({relay->address()}, std::chrono::seconds(2), outcome.Callback());
+  agent.Gather({traversal->address()}, std::chrono::seconds(2), outcome.Callback());
   ASSERT_TRUE(WaitUntil([&]() { return outcome.done.load(); }, 5000));
   EXPECT_EQ(outcome.result, Result::Success);
   // one reflector cannot classify the mapping
   EXPECT_EQ(outcome.nat_type, p2p::NatType::Unknown);
   agent.Stop();
-  relay->Stop();
+  traversal->Stop();
 }
 
 // ClassifyNat is pure, so the verdicts a real gather cannot reach on loopback

@@ -26,7 +26,7 @@ struct ZDTConnection {
   // negotiated in the handshake: connection migration runs only when both ends
   // offered it (kZDTCapMigration). Gates the cid stamped on every datagram.
   bool migration_enabled = false;
-  // nonzero on a connection that runs through a p2p::RelayServer: every
+  // nonzero on a connection that runs through a p2p::Relay: every
   // datagram is prefixed with the relay channel header carrying it, and the
   // MTU budget shrinks by that header
   uint32_t relay_channel = 0;

@@ -12,7 +12,7 @@
 #ifndef ZNET_P2P_RENDEZVOUS_SERVER_H_
 #define ZNET_P2P_RENDEZVOUS_SERVER_H_
 
-#include "znet/p2p/relay_server.h"
+#include "znet/p2p/traversal_server.h"
 #include "znet/p2p/rendezvous.h"
 #include "znet/server.h"
 #include "znet/server_events.h"
@@ -31,7 +31,8 @@
 namespace znet {
 namespace p2p {
 
-/** @brief What a RendezvousServer listens on, and the relay it runs. */
+/** @brief What a RendezvousServer listens on, and the traversal server it
+ *         runs. */
 struct RendezvousServerConfig {
   std::string bind_address = "0.0.0.0";
   PortNumber bind_port = 5001;
@@ -51,23 +52,24 @@ struct RendezvousServerConfig {
   uint32_t max_requests_per_window = 30;
   /** @brief The window max_requests_per_window is counted over. */
   std::chrono::milliseconds request_window{10000};
-  /** @brief Run a relay alongside, configured by `relay`. */
-  bool relay_enabled = false;
-  RelayServerConfig relay;
+  /** @brief Run a traversal server (reflector + relay) alongside, configured
+   *         by `traversal`. */
+  bool traversal_enabled = false;
+  TraversalServerConfig traversal;
   /**
-   * @brief The host peers reach the relay at, when it is not the host they
-   *        reached the rendezvous at: the two are advertised together and
-   *        an empty value means "same host as me". Resolved once at
+   * @brief The host peers reach the traversal server at, when it is not the
+   *        host they reached the rendezvous at: the two are advertised together
+   *        and an empty value means "same host as me". Resolved once at
    *        Start(), which fails with InvalidAddress if it does not.
    */
-  std::string relay_host;
+  std::string traversal_host;
   /**
-   * @brief Reflectors advertised beside the embedded relay, each a znet relay
-   *        control endpoint (build with InetAddress::from). A second one on a
-   *        distinct IP is what lets a peer tell an endpoint-independent NAT
-   *        from a symmetric one; without it every gather reports Unknown. The
-   *        welcome advertises the relay first, then these, capped at
-   *        kMaxReflectors.
+   * @brief Reflectors advertised beside the embedded traversal server, each a
+   *        znet traversal control endpoint (build with InetAddress::from). A
+   *        second one on a distinct IP is what lets a peer tell an
+   *        endpoint-independent NAT from a symmetric one; without it every
+   *        gather reports Unknown. The welcome advertises the embedded server
+   *        first, then these, capped at kMaxReflectors.
    */
   std::vector<std::shared_ptr<InetAddress>> extra_reflectors;
 };
@@ -81,9 +83,9 @@ struct RendezvousServerConfig {
  * TCP; `punch_connection_type` is the transport the punched peer-to-peer
  * connection will use, decided here so both peers always agree.
  *
- * With `relay_enabled` it also runs a RelayServer: every welcome names the
- * relay as the reflector, and every ZDT offer carries a relayed candidate
- * both peers can fall back to.
+ * With `traversal_enabled` it also runs a TraversalServer: every welcome names
+ * its reflector, and every ZDT offer carries a relayed candidate both peers can
+ * fall back to.
  */
 class RendezvousServer {
  public:
@@ -91,7 +93,8 @@ class RendezvousServer {
   ~RendezvousServer();
   RendezvousServer(const RendezvousServer&) = delete;
 
-  /** @brief Binds, listens, starts the pairing thread and the relay if any. */
+  /** @brief Binds, listens, starts the pairing thread and the traversal server
+   *         if any. */
   Result Start();
 
   void Stop();
@@ -104,8 +107,10 @@ class RendezvousServer {
     return server_.bind_address();
   }
 
-  /** @brief The relay this rendezvous runs, or null without one. */
-  ZNET_NODISCARD const RelayServer* relay() const { return relay_.get(); }
+  /** @brief The traversal server this rendezvous runs, or null without one. */
+  ZNET_NODISCARD const TraversalServer* traversal() const {
+    return traversal_.get();
+  }
 
  private:
   friend class RendezvousPacketHandler;
@@ -144,16 +149,17 @@ class RendezvousServer {
   // the candidates a match is told to punch, in the order to try them
   std::vector<Candidate> OfferCandidates(const ClientData& client,
                                          const Candidate* relayed) const;
-  // the relay's host as peers should address it: relay_host_ at `port`
-  std::shared_ptr<InetAddress> RelayEndpoint(PortNumber port) const;
+  // the traversal server's host as peers should address it: traversal_host_
+  // at `port`
+  std::shared_ptr<InetAddress> TraversalEndpoint(PortNumber port) const;
   std::string GenerateUniqueName();
 
   RendezvousServerConfig config_;
   Server server_;
-  std::unique_ptr<RelayServer> relay_;
-  // relay_host resolved once at Start(); the unspecified address
+  std::unique_ptr<TraversalServer> traversal_;
+  // traversal_host resolved once at Start(); the unspecified address
   // when it is empty, meaning "the host you reached me at"
-  std::shared_ptr<InetAddress> relay_host_;
+  std::shared_ptr<InetAddress> traversal_host_;
   Task pairing_task_;
 
   std::mutex mutex_;

@@ -67,7 +67,7 @@ ZNET_INLINE_CONSTEXPR uint8_t kFlagHasCid = 1u << 3;  // 8-byte connection id pr
 ZNET_INLINE_CONSTEXPR uint8_t kFlagOnline = 1u << 7;  // online-datagram marker
 
 // --- Relay channel header ----------------------------------------------------
-// every datagram between a peer and a p2p::RelayServer, in both directions,
+// every datagram between a peer and a p2p::Relay, in both directions,
 // carries marker(1) + channel(3) in front of the ZDT datagram, so one relay
 // port can serve every pairing and the receiving host can tell relayed peers
 // apart. the marker is bits 7 and 6, which no ZDT datagram ever has together,
@@ -92,8 +92,8 @@ enum class ZDTOfflineMsg : uint8_t {
   AlreadyConnected = 0x07,
   ConnectionBanned = 0x08,
   Punch = 0x09,  // P2P NAT hole-punch keepalive (not part of the client/server flow)
-  // between a peer and a p2p::RelayServer; none of these appear in the
-  // client/server flow either. See znet/p2p/relay_server.h.
+  // between a peer and a p2p::Relay; none of these appear in the
+  // client/server flow either. See znet/p2p/traversal_server.h.
   RelayBind = 0x0A,   // peer -> relay: token(8)
   RelayBound = 0x0B,  // relay -> peer: token(8), channel(4)
   Reflect = 0x0C,     // peer -> relay: nonce(8), padded to kZDTReflectSize

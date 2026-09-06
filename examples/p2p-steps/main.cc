@@ -20,7 +20,7 @@
 #include "znet/init.h"
 #include "znet/p2p/agent.h"
 #include "znet/p2p/punch.h"
-#include "znet/p2p/relay_server.h"
+#include "znet/p2p/traversal_server.h"
 #include "znet/packet_handler.h"
 #include "znet/peer_session.h"
 
@@ -170,14 +170,16 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // The relay doubles as the reflector both agents gather against. Port 0
-  // takes an ephemeral one; a deployment fixes it and opens it for UDP.
-  p2p::RelayServerConfig relay_config;
-  relay_config.bind_address = "127.0.0.1";
-  relay_config.port = 0;
-  p2p::RelayServer relay{relay_config};
-  if ((result = relay.Start()) != Result::Success) {
-    ZNET_LOG_ERROR("Relay failed to start: {}", GetResultString(result));
+  // One traversal server does both halves the agents need: the reflector they
+  // gather against and the relay they fall back to. Port 0 takes an ephemeral
+  // one; a deployment fixes it and opens it for UDP.
+  p2p::TraversalServerConfig traversal_config;
+  traversal_config.bind_address = "127.0.0.1";
+  traversal_config.port = 0;
+  p2p::TraversalServer traversal{traversal_config};
+  if ((result = traversal.Start()) != Result::Success) {
+    ZNET_LOG_ERROR("Traversal server failed to start: {}",
+                   GetResultString(result));
     return 1;
   }
 
@@ -192,19 +194,21 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  std::vector<p2p::Candidate> a_candidates = GatherSync(a, "a", relay.address());
-  std::vector<p2p::Candidate> b_candidates = GatherSync(b, "b", relay.address());
+  std::vector<p2p::Candidate> a_candidates =
+      GatherSync(a, "a", traversal.address());
+  std::vector<p2p::Candidate> b_candidates =
+      GatherSync(b, "b", traversal.address());
 
   // A broker allocates one pairing for the two and hands both the same
-  // token; the relay's address plus that token is the Relayed candidate.
-  p2p::RelayServer::Allocation allocation;
-  if ((result = relay.Allocate(allocation)) != Result::Success) {
+  // token; the server's address plus that token is the Relayed candidate.
+  p2p::Relay::Allocation allocation;
+  if ((result = traversal.relay()->Allocate(allocation)) != Result::Success) {
     ZNET_LOG_ERROR("No relay pairing: {}", GetResultString(result));
     return 1;
   }
   p2p::Candidate relayed;
   relayed.type = p2p::CandidateType::Relayed;
-  relayed.address = relay.address();
+  relayed.address = traversal.address();
   relayed.relay_token = allocation.token;
 
   // The broker also picks the punch id; IsInitiator turns it into the
@@ -233,7 +237,7 @@ int main(int argc, char* argv[]) {
   for (int i = 0; i < 300 && notes_received_ < 2; i++) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  const p2p::RelayMetrics metrics = relay.metrics();
+  const p2p::RelayMetrics metrics = traversal.relay()->metrics();
   ZNET_LOG_INFO("relay forwarded {} datagrams ({} bytes)",
                 metrics.datagrams_relayed, metrics.bytes_relayed);
 
@@ -242,8 +246,8 @@ int main(int argc, char* argv[]) {
   a.Stop();
   b.Stop();
   // a broker that knows the pairing is over frees it; otherwise its timers do
-  relay.Free(allocation.channel);
-  relay.Stop();
+  traversal.relay()->Free(allocation.channel);
+  traversal.Stop();
   Cleanup();
   return notes_received_ == 2 ? 0 : 1;
 }

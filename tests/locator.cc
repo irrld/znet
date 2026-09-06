@@ -90,12 +90,12 @@ p2p::RendezvousServerConfig LoopbackRendezvous(ConnectionType punch_type) {
   return config;
 }
 
-// a relay on loopback too, advertised as "the rendezvous host" so the
-// locators exercise the substitution
-void EnableLoopbackRelay(p2p::RendezvousServerConfig& config) {
-  config.relay_enabled = true;
-  config.relay.bind_address = "127.0.0.1";
-  config.relay.port = 0;
+// a traversal server on loopback too, advertised as "the rendezvous host" so
+// the locators exercise the substitution
+void EnableLoopbackTraversal(p2p::RendezvousServerConfig& config) {
+  config.traversal_enabled = true;
+  config.traversal.bind_address = "127.0.0.1";
+  config.traversal.port = 0;
 }
 
 // waits until the probe reports either outcome; true means connected
@@ -429,11 +429,11 @@ TEST(PeerLocatorEndToEnd, AskingBeforeTheLinkIsRefused) {
 
 TEST(PeerLocatorWithRelay, ReadyReportsTheReflexiveEndpoint) {
   p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
-  EnableLoopbackRelay(config);
+  EnableLoopbackTraversal(config);
   RunPunchEndToEnd(config, [](p2p::RendezvousServer&, AgentLocatorProbe& a,
                               AgentLocatorProbe& b) {
-    // the reflector on the relay's control port told each socket its mapping,
-    // which on loopback is the socket itself
+    // the reflector on the traversal server's port told each socket its
+    // mapping, which on loopback is the socket itself
     ASSERT_TRUE(a.Endpoint());
     EXPECT_EQ(a.Endpoint()->readable(),
               "127.0.0.1:" + std::to_string(a.locator.agent().punch_port()));
@@ -444,20 +444,20 @@ TEST(PeerLocatorWithRelay, ReadyReportsTheReflexiveEndpoint) {
 
 TEST(PeerLocatorWithRelay, PunchesDirectAndTheRelayIsFreed) {
   p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
-  EnableLoopbackRelay(config);
-  config.relay.idle_timeout = std::chrono::milliseconds(500);
+  EnableLoopbackTraversal(config);
+  config.traversal.relay.idle_timeout = std::chrono::milliseconds(500);
   RunPunchEndToEnd(config, [](p2p::RendezvousServer& rendezvous,
                               AgentLocatorProbe& a, AgentLocatorProbe& b) {
     // both were offered the relay and bound it, the direct path won, and
     // the unused allocation goes back once it idles
     EXPECT_NE(a.Session()->remote_address()->readable(),
               b.Session()->remote_address()->readable());
-    ASSERT_NE(rendezvous.relay(), nullptr);
+    ASSERT_NE(rendezvous.traversal(), nullptr);
     EXPECT_TRUE(WaitUntil(
-        [&]() { return rendezvous.relay()->metrics().binds_accepted == 2u; },
+        [&]() { return rendezvous.traversal()->relay()->metrics().binds_accepted == 2u; },
         3000));
     EXPECT_TRUE(WaitUntil(
-        [&]() { return rendezvous.relay()->allocation_count() == 0; }, 5000))
+        [&]() { return rendezvous.traversal()->relay()->allocation_count() == 0; }, 5000))
         << "a relay nobody uses must be freed";
   });
 }
@@ -689,10 +689,10 @@ TEST(RendezvousExchange, TheLatestGatheringWins) {
 TEST(RendezvousExchange, ARelayIsOfferedToBothSides) {
   ASSERT_EQ(Init(), Result::Success);
   p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
-  EnableLoopbackRelay(config);
+  EnableLoopbackTraversal(config);
   p2p::RendezvousServer rendezvous{config};
   ASSERT_EQ(rendezvous.Start(), Result::Success);
-  ASSERT_NE(rendezvous.relay(), nullptr);
+  ASSERT_NE(rendezvous.traversal(), nullptr);
   RawClient a{rendezvous.bind_address()->port()};
   RawClient b{rendezvous.bind_address()->port()};
   a.Connect();
@@ -701,7 +701,7 @@ TEST(RendezvousExchange, ARelayIsOfferedToBothSides) {
   ASSERT_EQ(a.reflectors.size(), 1u);
   EXPECT_TRUE(p2p::IsUnspecifiedHost(*a.reflectors[0]));
   EXPECT_EQ(a.reflectors[0]->port(),
-            rendezvous.relay()->address()->port());
+            rendezvous.traversal()->address()->port());
 
   a.Gather(4444, {});
   b.Gather(5555, {});
@@ -717,7 +717,7 @@ TEST(RendezvousExchange, ARelayIsOfferedToBothSides) {
   EXPECT_EQ(to_a.back().address->port(), to_b.back().address->port());
   EXPECT_EQ(to_a.back().relay_token, to_b.back().relay_token);
   EXPECT_NE(to_a.back().relay_token, 0u);
-  EXPECT_EQ(rendezvous.relay()->allocation_count(), 1u);
+  EXPECT_EQ(rendezvous.traversal()->relay()->allocation_count(), 1u);
   a.client.Disconnect();
   b.client.Disconnect();
   rendezvous.Stop();
@@ -726,7 +726,7 @@ TEST(RendezvousExchange, ARelayIsOfferedToBothSides) {
 TEST(RendezvousExchange, AClientIsNeverItsOwnMatch) {
   ASSERT_EQ(Init(), Result::Success);
   p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
-  EnableLoopbackRelay(config);
+  EnableLoopbackTraversal(config);
   p2p::RendezvousServer rendezvous{config};
   ASSERT_EQ(rendezvous.Start(), Result::Success);
   RawClient a{rendezvous.bind_address()->port()};
@@ -736,25 +736,25 @@ TEST(RendezvousExchange, AClientIsNeverItsOwnMatch) {
   a.Ask(a.Name());
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   EXPECT_EQ(a.offer_count.load(), 0);
-  EXPECT_EQ(rendezvous.relay()->allocation_count(), 0u);
+  EXPECT_EQ(rendezvous.traversal()->relay()->allocation_count(), 0u);
   a.client.Disconnect();
   rendezvous.Stop();
 }
 
-TEST(RendezvousExchange, ARelayHostThatDoesNotResolveRefusesToStart) {
+TEST(RendezvousExchange, ATraversalHostThatDoesNotResolveRefusesToStart) {
   ASSERT_EQ(Init(), Result::Success);
   p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::ZDT);
-  EnableLoopbackRelay(config);
-  config.relay_host = "no-such-host.invalid";
+  EnableLoopbackTraversal(config);
+  config.traversal_host = "no-such-host.invalid";
   p2p::RendezvousServer rendezvous{config};
   EXPECT_EQ(rendezvous.Start(), Result::InvalidAddress)
-      << "a bad relay host is a configuration error, not a crash later";
+      << "a bad traversal host is a configuration error, not a crash later";
 }
 
 TEST(RendezvousExchange, NoRelayForATCPPunch) {
   ASSERT_EQ(Init(), Result::Success);
   p2p::RendezvousServerConfig config = LoopbackRendezvous(ConnectionType::TCP);
-  EnableLoopbackRelay(config);
+  EnableLoopbackTraversal(config);
   p2p::RendezvousServer rendezvous{config};
   ASSERT_EQ(rendezvous.Start(), Result::Success);
   RawClient a{rendezvous.bind_address()->port()};
@@ -765,7 +765,7 @@ TEST(RendezvousExchange, NoRelayForATCPPunch) {
   b.Gather(5555, {});
   Exchange(a, b);
   EXPECT_EQ(a.Offered().size(), 1u) << "a TCP punch cannot use a UDP relay";
-  EXPECT_EQ(rendezvous.relay()->allocation_count(), 0u);
+  EXPECT_EQ(rendezvous.traversal()->relay()->allocation_count(), 0u);
   a.client.Disconnect();
   b.client.Disconnect();
   rendezvous.Stop();

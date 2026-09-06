@@ -70,7 +70,7 @@ set(ZNET_SOURCES
         src/backend/zdt/zdt_transport.cc
         src/backend/zdt/zdt_backends.cc
         src/p2p/locator.cc
-        src/p2p/relay_server.cc
+        src/p2p/traversal_server.cc
         src/p2p/internal/zdt_punch.cc
         src/p2p/internal/gather.cc
         src/p2p/tcp/punch.cc
