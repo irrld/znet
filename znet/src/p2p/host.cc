@@ -11,6 +11,7 @@
 #include "znet/p2p/host.h"
 
 #include "znet/backends/zdt.h"
+#include "znet/backends/zdt/zdt_cookie.h"
 #include "znet/error.h"
 #include "znet/logger.h"
 #include "znet/p2p/internal/gather.h"
@@ -62,6 +63,9 @@ Result Host::Start() {
     return Result::CannotBind;
   }
   local_address_ = socket_->local_address();
+  // seeds itself; needs znet::Init(), which p2p usage already relies on for
+  // GenerateGuid during a punch.
+  cookie_secret_.reset(new CookieSecret());
   running_.store(true);
   task_.Run([this]() { TickLoop(); });
   ZNET_LOG_INFO("P2P host up on {}", local_address_->readable());
@@ -167,6 +171,9 @@ void Host::Punch(PunchOffer offer, PunchCallback on_done) {
 
 void Host::TickLoop() {
   while (!task_.IsStopRequested()) {
+    ApplyPendingRebind();
+    cookie_secret_->MaybeRotate(config_.session_options.zdt.cookie_secret_rotation,
+                                clock::now());
     bool worked = DrainSocket();
     worked = TickGathers() || worked;
     worked = TickPunches() || worked;
@@ -216,10 +223,41 @@ bool Host::DrainSocket() {
         continue;
       }
     }
+    // migration is a property of direct sessions: a relayed peer is always
+    // reached through the relay's fixed address, so its path never changes here
+    const bool migratable =
+        channel == 0 && config_.session_options.zdt.enable_connection_migration;
     auto route = routes_.find(RouteKey(*from, channel));
     if (route != routes_.end()) {
+      // a PathChallenge from a known peer is an offline control message, not
+      // session data; answer it instead of handing it to the transport
+      if (migratable && !(data[0] & kFlagOnline)) {
+        ZDTOfflineMsg id;
+        if (PeekOfflineHeader(data, data_len, id) &&
+            id == ZDTOfflineMsg::PathChallenge) {
+          AnswerPathChallenge(from, data, data_len);
+          continue;
+        }
+      }
       route->second.transport->OnDatagram(data, data_len);
       continue;
+    }
+    // an unknown address: a moved peer answering our challenge, or one whose
+    // first datagram from the new path should trigger one
+    if (migratable) {
+      if (!(data[0] & kFlagOnline)) {
+        ZDTOfflineMsg id;
+        if (PeekOfflineHeader(data, data_len, id) &&
+            id == ZDTOfflineMsg::PathResponse) {
+          CompletePathMigration(from, data, data_len);
+          continue;
+        }
+      } else {
+        uint64_t cid = 0;
+        if (PeekCid(data, data_len, cid) && ChallengeNewPath(cid, from)) {
+          continue;  // a moved peer; the path is unproven, so drop the datagram
+        }
+      }
     }
     HandleOffline(from, channel, data, data_len);
   }
@@ -436,6 +474,8 @@ void Host::CompletePunch(size_t index, const internal::PunchOutcome& outcome) {
   Route route;
   route.transport = raw;
   route.session = session;
+  route.remote_guid = connection.remote_guid;
+  route.local_guid = connection.local_guid;
   route.ready_deadline = clock::now() + offer.timeout;
   if (punch.on_done) {
     route.waiters.push_back(std::move(punch.on_done));
@@ -456,6 +496,141 @@ void Host::FailPunch(size_t index, Result reason) {
   if (punch.on_done) {
     punch.on_done(reason, nullptr);
   }
+}
+
+bool Host::ChallengeNewPath(uint64_t cid,
+                            const std::shared_ptr<InetAddress>& from) {
+  // a live session must claim this cid, or this is not a moved peer: it may be
+  // an in-flight punch's first datagram, which HandleOffline still needs
+  bool known = false;
+  for (const auto& item : routes_) {
+    if (item.second.remote_guid == cid && item.second.session->IsAlive()) {
+      known = true;
+      break;
+    }
+  }
+  if (!known) {
+    return false;
+  }
+  Buffer out = WritePathMessage(
+      ZDTOfflineMsg::PathChallenge,
+      MakePathChallenge(*cookie_secret_, from->readable(), cid));
+  socket_->SendTo(*from, out.data(), out.size());
+  return true;
+}
+
+void Host::CompletePathMigration(const std::shared_ptr<InetAddress>& from,
+                                 const uint8_t* data, size_t len) {
+  Buffer buffer(reinterpret_cast<const char*>(data), len,
+                Endianness::BigEndian);
+  ZDTOfflineMsg id;
+  ZDTPathMessage response;
+  if (!ReadOfflineHeader(buffer, id) || !ReadPathMessage(buffer, response)) {
+    return;
+  }
+  const std::string new_key = RouteKey(*from, 0);
+  // a matching cookie proves the response came back from the path we probed
+  if (!VerifyPathResponse(*cookie_secret_, new_key, response)) {
+    return;
+  }
+  for (auto it = routes_.begin(); it != routes_.end(); ++it) {
+    if (it->second.remote_guid != response.cid) {
+      continue;
+    }
+    if (!it->second.session->IsAlive() || it->first == new_key) {
+      return;  // gone, or already here from a duplicate response
+    }
+    Route route = std::move(it->second);
+    routes_.erase(it);
+    route.transport->MigratePeer(from);
+    routes_[new_key] = std::move(route);
+    ZNET_LOG_INFO("P2P host: migrated a session to {}", new_key);
+    return;
+  }
+}
+
+void Host::AnswerPathChallenge(const std::shared_ptr<InetAddress>& from,
+                               const uint8_t* data, size_t len) {
+  Buffer buffer(reinterpret_cast<const char*>(data), len,
+                Endianness::BigEndian);
+  ZDTOfflineMsg id;
+  ZDTPathMessage challenge;
+  if (!ReadOfflineHeader(buffer, id) || !ReadPathMessage(buffer, challenge)) {
+    return;
+  }
+  // only answer a challenge for a connection we own, so we cannot be used to
+  // reflect responses for a cid that is not ours
+  bool ours = false;
+  for (const auto& item : routes_) {
+    if (item.second.local_guid == challenge.cid &&
+        item.second.session->IsAlive()) {
+      ours = true;
+      break;
+    }
+  }
+  if (!ours) {
+    return;
+  }
+  Buffer out = WritePathMessage(ZDTOfflineMsg::PathResponse, challenge);
+  socket_->SendTo(*from, out.data(), out.size());
+}
+
+Result Host::Rebind(const std::string& ip, PortNumber port) {
+  if (!running_.load()) {
+    return Result::AlreadyStopped;
+  }
+  auto address = InetAddress::from(ip, port);
+  if (!address || !address->is_valid() ||
+      address->ipv() == InetProtocolVersion::Unix) {
+    return Result::InvalidAddress;
+  }
+  // bind the new socket on the caller's thread; a failure leaves the host as is
+  auto new_socket = std::make_shared<UDPSocket>();
+  if (new_socket->Open(address->ipv()) != Result::Success) {
+    return Result::CannotCreateSocket;
+  }
+  new_socket->SetBlocking(false);
+  new_socket->SetDontFragment(true);
+  ApplySocketBufferSizes(*new_socket,
+                         config_.session_options.zdt.socket_recv_buffer,
+                         config_.session_options.zdt.socket_send_buffer);
+  if (new_socket->Bind(*address) != Result::Success) {
+    ZNET_LOG_ERROR("P2P host: rebind failed to bind {}: {}", address->readable(),
+                   GetLastErrorInfo());
+    new_socket->Close();
+    return Result::CannotBind;
+  }
+  // the host thread owns the socket and every transport, so it applies the swap
+  std::lock_guard<std::mutex> lock(pending_mutex_);
+  if (!running_.load()) {
+    return Result::AlreadyStopped;
+  }
+  pending_rebind_ = std::move(new_socket);
+  return Result::Success;
+}
+
+void Host::ApplyPendingRebind() {
+  std::shared_ptr<UDPSocket> next;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    next = std::move(pending_rebind_);
+    pending_rebind_.reset();
+  }
+  if (!next) {
+    return;
+  }
+  // retarget every session's send path onto the new socket; each peer re-paths
+  // to us by cid as our datagrams start arriving from the new address
+  for (auto& item : routes_) {
+    item.second.transport->MigrateSocket(next);
+  }
+  socket_ = next;
+  std::shared_ptr<InetAddress> bound = socket_->local_address();
+  {
+    std::lock_guard<std::mutex> lock(address_mutex_);
+    local_address_ = bound;
+  }
+  ZNET_LOG_INFO("P2P host: rebound to {}", bound->readable());
 }
 
 }  // namespace p2p

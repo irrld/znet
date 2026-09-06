@@ -116,6 +116,63 @@ TEST(P2PHost, PunchesAsynchronouslyAndExchangesMessages) {
   b.Stop();
 }
 
+// a host owns one socket for every peer, so rebinding it moves them together:
+// the peer re-paths each session by its connection id as the datagrams start
+// arriving from the new address.
+TEST(P2PHost, MigratesASessionWhenTheHostRebinds) {
+  ASSERT_EQ(Init(), Result::Success);
+  p2p::HostConfig config;
+  config.bind_address = "127.0.0.1";
+  config.session_options.zdt.enable_connection_migration = true;
+  p2p::Host a{config};
+  p2p::Host b{config};
+  ASSERT_EQ(a.Start(), Result::Success);
+  ASSERT_EQ(b.Start(), Result::Success);
+
+  PunchOutcome at_a;
+  PunchOutcome at_b;
+  a.Punch(Offer({HostAddr(b)}, 7, /*is_initiator=*/true), at_a.Callback());
+  b.Punch(Offer({HostAddr(a)}, 7, /*is_initiator=*/false), at_b.Callback());
+  ASSERT_TRUE(WaitUntil([&]() { return at_a.done.load() && at_b.done.load(); },
+                        12000));
+  ASSERT_EQ(at_a.result, Result::Success);
+  ASSERT_EQ(at_b.result, Result::Success);
+  ASSERT_TRUE(WaitUntil([&]() { return BothReady(at_a, at_b); }, 10000));
+
+  auto collector = std::make_shared<NoteCollector>();
+  at_a.Session()->SetCodec(MakeNoteCodec());
+  at_b.Session()->SetCodec(MakeNoteCodec());
+  at_b.Session()->SetHandler(collector);
+
+  // a message flows before the move
+  auto before = std::make_shared<NotePacket>();
+  before->text = "before";
+  ASSERT_EQ(at_a.Session()->SendPacket(before), Result::Success);
+  ASSERT_TRUE(WaitUntil([&]() { return collector->count.load() == 1; }, 5000));
+
+  // move A to a fresh local port under the live session, then wait for the swap
+  // to land so the next datagram provably leaves from the new address
+  const PortNumber old_port = a.punch_port();
+  ASSERT_EQ(a.Rebind("127.0.0.1", 0), Result::Success);
+  ASSERT_TRUE(WaitUntil([&]() { return a.punch_port() != old_port; }, 5000));
+
+  // a message over the new path: A's first datagram from there makes B challenge
+  // it and is dropped, and the reliable retransmit lands once B re-paths, so
+  // delivery proves the session survived the rebind
+  auto after = std::make_shared<NotePacket>();
+  after->text = "after";
+  ASSERT_EQ(at_a.Session()->SendPacket(after), Result::Success);
+  ASSERT_TRUE(WaitUntil([&]() { return collector->count.load() == 2; }, 8000))
+      << "the session did not survive the host rebind";
+  {
+    std::lock_guard<std::mutex> lock(collector->mutex);
+    EXPECT_EQ(collector->notes[1], "after");
+  }
+
+  a.Stop();
+  b.Stop();
+}
+
 // the responder may speak from inside its ready callback, and that lands on
 // the initiator in the very pass that made it ready, before its own callback
 // installed anything: the transport keeps it until then

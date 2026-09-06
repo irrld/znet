@@ -30,6 +30,7 @@ namespace znet {
 namespace backends {
 class UDPSocket;
 class ZDTTransportLayer;
+class CookieSecret;
 }  // namespace backends
 
 namespace p2p {
@@ -139,12 +140,28 @@ class Host {
    */
   void Punch(PunchOffer offer, PunchCallback on_done);
 
+  /**
+   * @brief Moves every punched session to a new local address, keeping them.
+   *
+   * The host owns one socket for all peers, so a rebind moves them together:
+   * it binds a fresh socket and lets each peer re-path by the connection id
+   * (the analog of Client::Rebind for the mesh). Needs
+   * enable_connection_migration on both ends; direct sessions only, since a
+   * relayed peer is reached through the relay's fixed address. Thread-safe: the
+   * swap is applied on the host's thread. Same local-address Result values as a
+   * bind.
+   */
+  Result Rebind(const std::string& ip, PortNumber port);
+
   /** @brief The UDP port every punch and session speaks from. */
   ZNET_NODISCARD PortNumber punch_port() const {
-    return local_address_ ? local_address_->port() : 0;
+    auto address = local_address();
+    return address ? address->port() : 0;
   }
 
   ZNET_NODISCARD std::shared_ptr<InetAddress> local_address() const {
+    // Rebind() reassigns this from the host thread, so reads take the lock
+    std::lock_guard<std::mutex> lock(address_mutex_);
     return local_address_;
   }
 
@@ -170,6 +187,11 @@ class Host {
     // owned by the session; valid exactly as long as the session lives
     backends::ZDTTransportLayer* transport = nullptr;
     std::shared_ptr<PeerSession> session;
+    // the connection ids the peer and we stamp on our datagrams. A datagram
+    // from a new address carrying remote_guid is this peer having moved; a
+    // PathChallenge naming local_guid is a peer asking us to prove our move.
+    uint64_t remote_guid = 0;
+    uint64_t local_guid = 0;
     // callers still owed a resolution for this peer
     std::vector<PunchCallback> waiters;
     std::chrono::steady_clock::time_point ready_deadline;
@@ -193,16 +215,37 @@ class Host {
   void FailPunch(size_t index, Result reason);
   static void ResolveWaiters(Route& route, Result result);
 
+  // connection migration, the peer-to-peer mirror of the ZDT server/client
+  // split: a direct datagram from a new address carrying a known remote_guid is
+  // a peer that moved, so challenge the path and re-key on a valid response;
+  // a PathChallenge from a peer means we moved, so answer it. All gated on
+  // enable_connection_migration and on direct (unrelayed) sessions. Host thread.
+  // true when a live session claims this cid, so the datagram was a moved peer
+  // and is dropped as unproven; false leaves it for HandleOffline (an in-flight
+  // punch's first datagram also arrives cid-stamped and unrouted).
+  bool ChallengeNewPath(uint64_t cid, const std::shared_ptr<InetAddress>& from);
+  void CompletePathMigration(const std::shared_ptr<InetAddress>& from,
+                             const uint8_t* data, size_t len);
+  void AnswerPathChallenge(const std::shared_ptr<InetAddress>& from,
+                           const uint8_t* data, size_t len);
+  // swaps in a socket a Rebind() bound, retargeting every session's send path
+  void ApplyPendingRebind();
+
   HostConfig config_;
   std::shared_ptr<backends::UDPSocket> socket_;
+  mutable std::mutex address_mutex_;  // guards local_address_ across a Rebind
   std::shared_ptr<InetAddress> local_address_;
   Task task_;
   std::atomic<bool> running_{false};
+  // signing secret for path-validation cookies (host thread only). Behind a
+  // pointer so this header stays clear of the ZDT backend definitions.
+  std::unique_ptr<backends::CookieSecret> cookie_secret_;
 
-  // handoff from Gather and Punch (any thread) to the tick thread
+  // handoff from Gather, Punch and Rebind (any thread) to the tick thread
   std::mutex pending_mutex_;
   std::vector<PunchInFlight> pending_;
   std::vector<Gathering> pending_gathers_;
+  std::shared_ptr<backends::UDPSocket> pending_rebind_;
 
   // tick thread only
   std::vector<PunchInFlight> punches_;
