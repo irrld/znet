@@ -119,6 +119,10 @@ class RendezvousServer {
     // slot: a client asks for several peers, and one slot made each ask
     // clobber the previous one. An entry is consumed when its pair forms.
     std::set<std::string> pending_targets;
+    // peers this client has been paired with, so a re-ask from a former
+    // partner (after its address changed) can nudge it to re-ask back rather
+    // than sit unpaired. Never pruned; a stale name only costs a wasted nudge.
+    std::set<std::string> paired_with;
     // what the client gathered, relayed to its match; empty until it did
     std::vector<Candidate> candidates;
     // the port the client punches from; zero falls back to the observed one

@@ -32,6 +32,9 @@ namespace p2p {
 // PunchOfferPacket   S -> C  to both, once each asked for the other: the
 //                            other's candidates, reflexive then host, plus a
 //                            relayed one when the server runs a relay
+// RepunchRequestPacket S -> C  a former partner re-asked after its address
+//                            changed; re-gather and re-ask it so the pair can
+//                            re-punch. See PeerLocator::Relocate.
 //
 // A reflector or relayed candidate whose host is unspecified (0.0.0.0) lives
 // on the rendezvous host itself; the client substitutes the address it
@@ -40,7 +43,7 @@ namespace p2p {
 // bumped whenever the packets below change shape; the welcome carries it and
 // a client that disagrees fails at once instead of waiting for a name that
 // never comes
-ZNET_INLINE_CONSTEXPR uint8_t kRendezvousProtocolVersion = 1;
+ZNET_INLINE_CONSTEXPR uint8_t kRendezvousProtocolVersion = 2;
 
 // wire ids of the rendezvous protocol; plain PacketIds, usable directly with
 // Codec::Add()
@@ -49,6 +52,7 @@ ZNET_INLINE_CONSTEXPR PacketId kPacketGathering = 1;
 ZNET_INLINE_CONSTEXPR PacketId kPacketConnectPeer = 2;
 ZNET_INLINE_CONSTEXPR PacketId kPacketPunchOffer = 3;
 ZNET_INLINE_CONSTEXPR PacketId kPacketPeerNotFound = 4;
+ZNET_INLINE_CONSTEXPR PacketId kPacketRepunchRequest = 5;
 
 // Cap on the reflectors a welcome may name
 ZNET_INLINE_CONSTEXPR size_t kMaxReflectors = 8;
@@ -225,6 +229,15 @@ class PeerNotFoundPacket : public Packet {
   std::string target_peer_;
 };
 
+/** @brief A former partner re-asked for this client after moving; the client
+ *         re-gathers and re-asks it so the two can re-punch. */
+class RepunchRequestPacket : public Packet {
+ public:
+  RepunchRequestPacket() : Packet(kPacketRepunchRequest) {}
+
+  std::string from_peer_;
+};
+
 class WelcomeSerializer : public PacketSerializer<WelcomePacket> {
  public:
   std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<WelcomePacket> packet, std::shared_ptr<Buffer> buffer) override {
@@ -324,6 +337,20 @@ class PeerNotFoundSerializer : public PacketSerializer<PeerNotFoundPacket> {
   }
 };
 
+class RepunchRequestSerializer : public PacketSerializer<RepunchRequestPacket> {
+ public:
+  std::shared_ptr<Buffer> SerializeTyped(std::shared_ptr<RepunchRequestPacket> packet, std::shared_ptr<Buffer> buffer) override {
+    buffer->WriteString(packet->from_peer_);
+    return buffer;
+  }
+
+  std::shared_ptr<RepunchRequestPacket> DeserializeTyped(std::shared_ptr<Buffer> buffer) override {
+    auto packet = std::make_shared<RepunchRequestPacket>();
+    packet->from_peer_ = buffer->ReadString();
+    return packet;
+  }
+};
+
 inline std::shared_ptr<Codec> BuildRendezvousCodec() {
   std::shared_ptr<znet::Codec> codec = std::make_shared<znet::Codec>();
   codec->Add(kPacketWelcome, std::make_unique<WelcomeSerializer>());
@@ -331,6 +358,7 @@ inline std::shared_ptr<Codec> BuildRendezvousCodec() {
   codec->Add(kPacketConnectPeer, std::make_unique<ConnectPeerSerializer>());
   codec->Add(kPacketPunchOffer, std::make_unique<PunchOfferSerializer>());
   codec->Add(kPacketPeerNotFound, std::make_unique<PeerNotFoundSerializer>());
+  codec->Add(kPacketRepunchRequest, std::make_unique<RepunchRequestSerializer>());
   return codec;
 }
 

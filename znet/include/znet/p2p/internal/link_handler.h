@@ -22,12 +22,13 @@ namespace internal {
 /**
  * @brief The packet handler on a locator's link to the rendezvous, shared by
  *        both locators: it only dispatches to the locator's OnWelcome,
- *        OnPeerNotFound and OnPunchOffer.
+ *        OnPeerNotFound, OnPunchOffer and OnRepunchRequest.
  */
 template <typename Locator>
 class LinkPacketHandler
     : public PacketHandler<LinkPacketHandler<Locator>, WelcomePacket,
-                           PunchOfferPacket, PeerNotFoundPacket> {
+                           PunchOfferPacket, PeerNotFoundPacket,
+                           RepunchRequestPacket> {
  public:
   explicit LinkPacketHandler(Locator& locator) : locator_(locator) {}
 
@@ -38,6 +39,10 @@ class LinkPacketHandler
   }
 
   void OnPacket(const PunchOfferPacket& pk) { locator_.OnPunchOffer(pk); }
+
+  void OnPacket(const RepunchRequestPacket& pk) {
+    locator_.OnRepunchRequest(pk.from_peer_);
+  }
 
  private:
   Locator& locator_;

@@ -19,6 +19,7 @@
 #include "znet/p2p/host.h"
 #include "znet/p2p/rendezvous.h"
 
+#include <set>
 #include <vector>
 
 namespace znet {
@@ -81,6 +82,19 @@ class PeerLocator {
    *         PeerLocatorReadyEvent has fired, NotConnected without a link. */
   Result AskPeer(std::string peer_name);
 
+  /**
+   * @brief Re-gathers on the current network and re-punches every connected
+   *        peer: the recovery for a local address change that connection
+   *        migration cannot ride out (a new NAT mapping the peers cannot reach).
+   *
+   * Call it when the OS reports the network changed. It re-sends the gathering
+   * with fresh candidates and re-asks each connected peer; the broker nudges
+   * those peers to re-ask back, and each pair re-punches into a new session
+   * (a fresh PeerConnectedEvent). NotReady until the first gather, NotConnected
+   * without a link.
+   */
+  Result Relocate();
+
   /** @brief Blocks until the link ends. The mesh may outlive it. */
   void Wait();
 
@@ -103,6 +117,11 @@ class PeerLocator {
   void OnGathered(Host::GatherResult result);
   void OnPeerNotFound(const std::string& target_peer);
   void OnPunchOffer(const PunchOfferPacket& offer);
+  // a former partner re-asked after moving: re-gather and re-ask it back
+  void OnRepunchRequest(const std::string& from_peer);
+  // re-gather, then re-ask `targets` once the fresh candidates are sent. Shared
+  // by Relocate (every connected peer) and OnRepunchRequest (one peer).
+  void BeginRepunch(std::vector<std::string> targets);
   // an unspecified host on the wire means the rendezvous host itself
   std::shared_ptr<InetAddress> AtRendezvous(
       const std::shared_ptr<InetAddress>& address) const;
@@ -117,6 +136,12 @@ class PeerLocator {
   std::string peer_name_;
   std::shared_ptr<InetAddress> observed_;
   std::shared_ptr<PeerSession> link_session_;
+  // the reflectors from the welcome, kept so a Relocate can re-gather
+  std::vector<std::shared_ptr<InetAddress>> reflectors_;
+  // peers a punch connected, so a Relocate knows whom to re-punch
+  std::set<std::string> connected_peers_;
+  // peers to re-ask once the next (relocate) gather has sent its candidates
+  std::vector<std::string> repunch_targets_;
   // this peer's own NAT-type verdict from its last gather; a symmetric one
   // sends every punch straight to the relay
   NatType nat_type_ = NatType::Unknown;

@@ -370,13 +370,26 @@ void RendezvousServer::TryPair(const std::shared_ptr<PeerSession>& session,
   }
   std::shared_ptr<ClientData> other_data = it->second;
   if (other_data->pending_targets.count(data->peer_name) == 0) {
-    ZNET_LOG_INFO("{} asked for {}, waiting for other peer to do the same.",
-                  data->peer_name, target);
+    // the target has not asked back. If the two were paired before, this is a
+    // re-ask after one of them moved, so nudge the target to re-ask and let the
+    // pair re-punch; A's ask stays pending for when it does.
+    if (other_data->paired_with.count(data->peer_name) != 0) {
+      ZNET_LOG_INFO("{} re-asked for {}; nudging it to re-punch.",
+                    data->peer_name, target);
+      auto nudge = std::make_shared<RepunchRequestPacket>();
+      nudge->from_peer_ = data->peer_name;
+      other_data->session->SendPacket(nudge);
+    } else {
+      ZNET_LOG_INFO("{} asked for {}, waiting for other peer to do the same.",
+                    data->peer_name, target);
+    }
     return;
   }
   // both asks are consumed by the pair; a later re-ask starts fresh
   data->pending_targets.erase(target);
   other_data->pending_targets.erase(data->peer_name);
+  data->paired_with.insert(target);
+  other_data->paired_with.insert(data->peer_name);
   const uint64_t punch_id = punch_id_rng_();
 
   // one relay pairing for the two, the same token on both sides; only ZDT

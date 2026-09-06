@@ -255,6 +255,11 @@ void PeerLocator::OnPeerNotFound(const std::string& target_peer) {
   FireFailed(PeerLocatorPhase::Exchange, Result::PeerNotFound, target_peer);
 }
 
+void PeerLocator::OnRepunchRequest(const std::string& from_peer) {
+  ZNET_LOG_INFO("Rendezvous: {} wants to re-punch; re-asking it", from_peer);
+  AskPeer(from_peer);
+}
+
 void PeerLocator::OnPunchOffer(const PunchOfferPacket& pk) {
   ZNET_LOG_INFO("Received a punch offer for {} with {} candidates",
                 pk.target_peer_, pk.candidates_.size());

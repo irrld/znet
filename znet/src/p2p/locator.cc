@@ -95,6 +95,46 @@ Result PeerLocator::AskPeer(std::string peer_name) {
   return Result::Success;
 }
 
+Result PeerLocator::Relocate() {
+  std::vector<std::string> targets;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!is_running_ || !link_session_) {
+      return Result::NotConnected;
+    }
+    if (!is_ready_) {
+      return Result::NotReady;  // never gathered, so nothing to re-send
+    }
+    targets.assign(connected_peers_.begin(), connected_peers_.end());
+  }
+  BeginRepunch(std::move(targets));
+  return Result::Success;
+}
+
+void PeerLocator::OnRepunchRequest(const std::string& from_peer) {
+  ZNET_LOG_INFO("Rendezvous: {} wants to re-punch; re-gathering", from_peer);
+  BeginRepunch({from_peer});
+}
+
+void PeerLocator::BeginRepunch(std::vector<std::string> targets) {
+  std::vector<std::shared_ptr<InetAddress>> reflectors;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& target : targets) {
+      repunch_targets_.push_back(std::move(target));
+    }
+    reflectors.reserve(reflectors_.size());
+    for (const auto& reflector : reflectors_) {
+      reflectors.push_back(reflector);
+    }
+  }
+  // re-gather; OnGathered re-sends the gathering and drains repunch_targets_
+  host_.Gather(std::move(reflectors), config_.gather_timeout,
+               [this](Host::GatherResult result) {
+                 OnGathered(std::move(result));
+               });
+}
+
 void PeerLocator::Wait() {
   client_.Wait();
 }
@@ -195,6 +235,10 @@ void PeerLocator::OnWelcome(const WelcomePacket& welcome) {
   for (const auto& reflector : welcome.reflectors_) {
     reflectors.push_back(AtRendezvous(reflector));
   }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reflectors_ = reflectors;  // kept so Relocate can re-gather
+  }
   host_.Gather(std::move(reflectors), config_.gather_timeout,
                [this](Host::GatherResult result) {
                  OnGathered(std::move(result));
@@ -232,6 +276,19 @@ void PeerLocator::OnGathered(Host::GatherResult gathered) {
   gathering->punch_port_ = host_.punch_port();
   gathering->candidates_ = gathered.candidates;
   session->SendPacket(gathering);
+
+  // a relocate or a nudge queued peers to re-ask; do it now that the fresh
+  // candidates are on their way to the broker, so it pairs with the new ones
+  std::vector<std::string> repunch;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    repunch.swap(repunch_targets_);
+  }
+  for (const auto& target : repunch) {
+    auto ask = std::make_shared<ConnectPeerPacket>();
+    ask->target_peer_ = target;
+    session->SendPacket(ask);
+  }
 
   // what peers will be told to punch: the reflexive mapping when one was
   // learned, else the rendezvous's view at the punch port
@@ -297,6 +354,10 @@ void PeerLocator::OnPunchOffer(const PunchOfferPacket& pk) {
       [this, punch_id, self_name, target_peer](
           Result result, std::shared_ptr<PeerSession> session) {
         if (result == Result::Success) {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            connected_peers_.insert(target_peer);  // so Relocate re-punches it
+          }
           PeerConnectedEvent event{session, punch_id, self_name, target_peer};
           if (event_callback_) {
             event_callback_(event);

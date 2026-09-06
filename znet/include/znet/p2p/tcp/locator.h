@@ -87,6 +87,9 @@ class PeerLocator {
   void OnWelcome(const WelcomePacket& welcome);
   void OnPeerNotFound(const std::string& target_peer);
   void OnPunchOffer(const PunchOfferPacket& offer);
+  // a former partner re-asked after moving; the two-player TCP path recovers
+  // by simply re-asking it, which re-pairs and re-punches.
+  void OnRepunchRequest(const std::string& from_peer);
   void FireFailed(PeerLocatorPhase phase, Result reason,
                   const std::string& target_peer);
 

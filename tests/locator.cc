@@ -305,6 +305,28 @@ TEST(PeerLocatorEndToEnd, ConnectedEventIsReady) {
                    });
 }
 
+// Relocate re-gathers and re-asks the connected peer; the broker nudges that
+// peer to re-ask back, so the pair re-punches and both see a second connect.
+// On loopback the address does not actually change, so the re-punch resolves to
+// the live session, but the whole relocate -> nudge -> re-ask -> re-pair cycle
+// still runs end to end.
+TEST(PeerLocatorEndToEnd, RelocateRepunchesTheConnectedPeer) {
+  RunPunchEndToEnd(
+      LoopbackRendezvous(ConnectionType::ZDT),
+      [](p2p::RendezvousServer&, HostLocatorProbe& a, HostLocatorProbe& b) {
+        const int a_before = a.connected.load();
+        const int b_before = b.connected.load();
+        ASSERT_EQ(a.locator.Relocate(), Result::Success);
+        EXPECT_TRUE(WaitUntil(
+            [&]() {
+              return a.connected.load() > a_before &&
+                     b.connected.load() > b_before;
+            },
+            20000))
+            << "the relocate did not re-punch the pair";
+      });
+}
+
 #ifndef ZNET_TARGET_WIN
 // std::clock() is process CPU time on POSIX, which is exactly the claim under
 // test; on Windows it is wall time and the test would be meaningless.
