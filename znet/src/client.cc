@@ -179,4 +179,11 @@ ZNET_NODISCARD std::shared_ptr<InetAddress> Client::local_address() const {
   return backend_->local_address();
 }
 
+Result Client::Rebind(const std::string& ip, PortNumber port) {
+  if (ZNET_UNLIKELY(!backend_)) ZNET_UNLIKELY_ATTR {
+    return Result::InvalidBackend;
+  }
+  return backend_->Rebind(ip, port);
+}
+
 }  // namespace znet

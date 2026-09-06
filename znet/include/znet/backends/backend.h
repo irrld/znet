@@ -35,6 +35,17 @@ class ClientBackend {
   virtual std::shared_ptr<InetAddress> local_address() = 0;
 
   /**
+   * @brief Backend hook for Client::Rebind. The default refuses with
+   *        InvalidBackend; a backend overrides it only if it can carry a
+   *        connection across an address change.
+   */
+  virtual Result Rebind(const std::string& ip, PortNumber port) {
+    (void)ip;
+    (void)port;
+    return Result::InvalidBackend;
+  }
+
+  /**
    * @brief Drops the backend's reference to a session that already ended, so
    *        its transport (and the port its socket owns) can actually free.
    *        A live session is left alone.

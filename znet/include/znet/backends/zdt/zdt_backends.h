@@ -80,11 +80,10 @@ class ZDTClientBackend : public ClientBackend {
     }
   }
 
-  // Moves the live session to a new local address: binds a fresh socket, swaps
-  // both the send side (the transport) and the receive loop to it, and lets the
-  // server re-path via the connection id. Needs enable_connection_migration on
-  // both ends. ZDT-specific, so not on the ClientBackend interface.
-  Result Rebind(const std::string& ip, PortNumber port);
+  // The ZDT rebind (see Client::Rebind): binds a fresh socket, swaps the
+  // transport's send side and the receive loop to it, and lets the server
+  // re-path via the connection id. Needs enable_connection_migration on both ends.
+  Result Rebind(const std::string& ip, PortNumber port) override;
 
  private:
   // on success fills `out` with the negotiated connection and returns Result::Success; otherwise a

@@ -740,9 +740,7 @@ TEST(ZDTMigration, SurvivesAClientRebind) {
   ASSERT_TRUE(client_session != nullptr);
 
   // move the client to a new local port under the live session
-  auto* backend = static_cast<backends::ZDTClientBackend*>(client.backend());
-  ASSERT_NE(backend, nullptr);
-  ASSERT_EQ(backend->Rebind("127.0.0.1", FreeUdpPort()), Result::Success);
+  ASSERT_EQ(client.Rebind("127.0.0.1", FreeUdpPort()), Result::Success);
 
   // a reliable request over the new path: its first datagram triggers the
   // server's challenge and is dropped, and the retransmit lands once the path

@@ -114,11 +114,15 @@ class Client : public Interface {
 
   ZNET_NODISCARD std::shared_ptr<InetAddress> local_address() const;
 
-  /** @brief The transport backend, for backend-specific operations like a ZDT
-   *         rebind. Internal tier: cast to the concrete backend to use it. */
-  ZNET_NODISCARD backends::ClientBackend* backend() const {
-    return backend_.get();
-  }
+  /**
+   * @brief Moves the live connection to a new local address without dropping
+   *        the session, so a client that changed network or port keeps talking.
+   *
+   * Only connection-oriented backends that survive an address change support
+   * it (ZDT with enable_connection_migration on both ends); others return
+   * InvalidBackend. Same local-address Result values as Bind() otherwise.
+   */
+  Result Rebind(const std::string& ip, PortNumber port);
 
  private:
   ClientConfig config_;
