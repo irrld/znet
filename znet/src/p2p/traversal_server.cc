@@ -80,7 +80,7 @@ void Reflector::OnReflect(UDPSocket& socket, const uint8_t* data, size_t len,
   // the answer names the source, so this path builds the address anyway;
   // the throttle keeps it a low-rate path
   sockaddr_storage copy{};
-  std::memcpy(&copy, from, from_len);
+  std::memcpy(&copy, from, static_cast<size_t>(from_len));
   auto observed = InetAddress::from(reinterpret_cast<sockaddr*>(&copy));
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -241,7 +241,7 @@ void Relay::OnBind(UDPSocket& socket, const uint8_t* data, size_t len,
       return;  // both sides are already here; a third is not a peer
     }
     Slot& bound = pairing.slots[slot];
-    std::memcpy(bound.address, from, from_len);
+    std::memcpy(bound.address, from, static_cast<size_t>(from_len));
     bound.length = from_len;
     ZNET_METRIC(metrics_.binds_accepted++);
     ZNET_LOG_DEBUG("Relay: channel {} bound side {}", pairing.channel, slot);
