@@ -225,7 +225,7 @@ uint16_t ZDTTransportLayer::DatagramMTU() const {
   if (connection_.relay_channel != 0) {
     overhead += kZDTRelayHeaderSize;
   }
-  if (config_.enable_connection_migration) {
+  if (connection_.migration_enabled) {
     overhead += kZDTCidSize;  // the connection id rides in every datagram
   }
   return overhead < mtu ? static_cast<uint16_t>(mtu - overhead) : mtu;
@@ -515,13 +515,13 @@ WireSeq ZDTTransportLayer::SendBatch(uint8_t extra_flags,
     record_bytes += ZDTRecordSize(batch[i].record.flags & kRecFragment,
                                   batch[i].payload_len);
   }
-  if (config_.enable_connection_migration) {
+  if (connection_.migration_enabled) {
     header.flags |= kFlagHasCid;
     header.cid = connection_.local_guid;
   }
   const size_t mtu = DatagramMTU();
   const size_t used = kZDTHeaderSize +
-                      (config_.enable_connection_migration ? kZDTCidSize : 0) +
+                      (connection_.migration_enabled ? kZDTCidSize : 0) +
                       record_bytes;
   // how far back is worth describing: anything older the peer has already seen
   // acked, or it could not have kept sending. The +64 is slack for reordering.
@@ -954,7 +954,7 @@ Result ZDTTransportLayer::Close(CloseOptions options) {
   if (socket_ && peer_) {
     ZDTHeader header;
     header.flags = static_cast<uint8_t>(kFlagOnline | kFlagFin);
-    if (config_.enable_connection_migration) {
+    if (connection_.migration_enabled) {
       header.flags |= kFlagHasCid;
       header.cid = connection_.local_guid;
     }

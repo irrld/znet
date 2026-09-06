@@ -39,17 +39,19 @@ Buffer BuildPunch() {
   return BuildOffline(ZDTOfflineMsg::Punch);
 }
 
-Buffer BuildRequest1(uint64_t local_guid) {
+Buffer BuildRequest1(uint64_t local_guid, uint8_t capabilities) {
   Buffer request = BuildOffline(ZDTOfflineMsg::OpenConnectionRequest1);
   request.WriteInt<uint8_t>(kZDTProtocolVersion);
   request.WriteInt<uint64_t>(local_guid);
+  request.WriteInt<uint8_t>(capabilities);
   return request;
 }
 
-Buffer BuildReply2(uint64_t local_guid, uint16_t mtu) {
+Buffer BuildReply2(uint64_t local_guid, uint16_t mtu, uint8_t capabilities) {
   Buffer reply = BuildOffline(ZDTOfflineMsg::OpenConnectionReply2);
   reply.WriteInt<uint64_t>(local_guid);
   reply.WriteInt<uint16_t>(mtu);
+  reply.WriteInt<uint8_t>(capabilities);
   return reply;
 }
 
@@ -102,8 +104,9 @@ void SendDatagram(UDPSocket& socket, const InetAddress& address,
   socket.SendTo(address, wrapped.data(), wrapped.size());
 }
 
-ZDTPunch::ZDTPunch(PunchOffer offer, TimePoint now)
+ZDTPunch::ZDTPunch(PunchOffer offer, TimePoint now, bool local_migration)
     : offer_(std::move(offer)),
+      local_migration_(local_migration),
       deadline_(now + offer_.timeout),
       relay_start_(now + offer_.relay_delay) {
   connection_.mtu = 1200;  // conservative; skips the ladder probe for P2P
@@ -175,7 +178,10 @@ PunchOutcome ZDTPunch::Tick(UDPSocket& socket, TimePoint now) {
   }
   // the initiator also drives the handshake (Request1 doubles as a punch)
   if (offer_.is_initiator && now - last_request_ > kRequestInterval) {
-    SendToActive(socket, BuildRequest1(connection_.local_guid), now);
+    SendToActive(socket,
+                 BuildRequest1(connection_.local_guid,
+                               local_migration_ ? kZDTCapMigration : 0),
+                 now);
     last_request_ = now;
     outcome.sent = true;
   }
@@ -245,9 +251,13 @@ PunchOutcome ZDTPunch::OnDatagram(UDPSocket& socket,
       return outcome;
     }
     connection_.remote_guid = in.ReadInt<uint64_t>();
+    const uint8_t peer_cap = in.ReadInt<uint8_t>();
+    connection_.migration_enabled =
+        local_migration_ && (peer_cap & kZDTCapMigration);
     answered_ = true;
     SendDatagram(socket, *from, channel,
-                 BuildReply2(connection_.local_guid, connection_.mtu));
+                 BuildReply2(connection_.local_guid, connection_.mtu,
+                             local_migration_ ? kZDTCapMigration : 0));
     // stays pending until online data confirms the peer connected, so a lost
     // Reply2 is simply re-answered on the next Request1
     return outcome;
@@ -258,6 +268,9 @@ PunchOutcome ZDTPunch::OnDatagram(UDPSocket& socket,
     if (mtu != 0) {
       connection_.mtu = std::min(connection_.mtu, mtu);
     }
+    const uint8_t peer_cap = in.ReadInt<uint8_t>();
+    connection_.migration_enabled =
+        local_migration_ && (peer_cap & kZDTCapMigration);
     outcome.state = PunchOutcome::State::Completed;
     outcome.from = from;
     outcome.channel = channel;

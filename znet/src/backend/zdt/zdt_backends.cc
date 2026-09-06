@@ -116,6 +116,7 @@ Result ZDTClientBackend::Handshake(ZDTConnection& out) {
   uint32_t epoch = 0;
   uint16_t negotiated_mtu = 0;
   uint64_t server_guid = 0;
+  uint8_t server_cap = 0;
   bool got_reply1 = false;
 
   // replies land and are parsed here; reset per datagram, reserved once
@@ -175,6 +176,7 @@ Result ZDTClientBackend::Handshake(ZDTConnection& out) {
           }
           reply.Read(cookie.data(), cookie.size());
           epoch = reply.ReadInt<uint32_t>();
+          server_cap = reply.ReadInt<uint8_t>();
           got_reply1 = true;
         } else if (id == ZDTOfflineMsg::IncompatibleProtocolVersion) {
           return Result::IncompatibleVersion;
@@ -201,6 +203,8 @@ Result ZDTClientBackend::Handshake(ZDTConnection& out) {
     request.WriteInetAddress(*server_address_);
     request.WriteInt<uint16_t>(negotiated_mtu);
     request.WriteInt<uint64_t>(guid_);
+    request.WriteInt<uint8_t>(
+        config_.enable_connection_migration ? kZDTCapMigration : 0);
     socket_->SendTo(*server_address_, request.data(), request.size());
 
     auto deadline = steady_clock::now() + config_.handshake_retransmit;
@@ -233,6 +237,8 @@ Result ZDTClientBackend::Handshake(ZDTConnection& out) {
         out.mtu = mtu ? mtu : negotiated_mtu;
         out.local_guid = guid_;
         out.remote_guid = reply_server_guid ? reply_server_guid : server_guid;
+        out.migration_enabled = config_.enable_connection_migration &&
+                                (server_cap & kZDTCapMigration);
         return Result::Success;
       }
       if (id == ZDTOfflineMsg::IncompatibleProtocolVersion) {
@@ -589,6 +595,8 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
     out.WriteInt<uint8_t>(static_cast<uint8_t>(cookie.size()));
     out.Write(cookie.data(), cookie.size());
     out.WriteInt<uint32_t>(cookie_secret_.epoch());
+    out.WriteInt<uint8_t>(
+        config_.enable_connection_migration ? kZDTCapMigration : 0);
     socket_->SendTo(*from, out.data(), out.size());
     return;
   }
@@ -605,6 +613,7 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
     (void)target;
     uint16_t mtu = buffer.ReadInt<uint16_t>();
     uint64_t client_guid = buffer.ReadInt<uint64_t>();
+    uint8_t client_cap = buffer.ReadInt<uint8_t>();
 
     // validate the cookie against the source address (return-routability).
     if (!ConstTimeEqual(cookie, cookie_secret_.Compute(key, epoch))) {
@@ -645,6 +654,8 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
         mtu ? mtu : ZDTPayloadForLinkMTU(config_.mtu_ladder.back(), from->ipv());
     connection.local_guid = server_guid_;
     connection.remote_guid = client_guid;
+    connection.migration_enabled =
+        config_.enable_connection_migration && (client_cap & kZDTCapMigration);
     auto transport = std::make_unique<ZDTTransportLayer>(
         socket_, from, config_, /*drains_own_socket=*/false, inbox, connection,
         child_session_options_.common);

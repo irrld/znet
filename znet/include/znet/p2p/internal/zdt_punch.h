@@ -39,8 +39,8 @@ namespace internal {
 // traffic on the socket is never mistaken for one
 Buffer BuildOffline(backends::ZDTOfflineMsg id);
 Buffer BuildPunch();
-Buffer BuildRequest1(uint64_t local_guid);
-Buffer BuildReply2(uint64_t local_guid, uint16_t mtu);
+Buffer BuildRequest1(uint64_t local_guid, uint8_t capabilities);
+Buffer BuildReply2(uint64_t local_guid, uint16_t mtu, uint8_t capabilities);
 Buffer BuildIncompatibleVersion(uint64_t local_guid);
 // the relay and reflector side; see znet/p2p/relay_server.h for the flow
 Buffer BuildRelayBind(uint64_t token);
@@ -105,7 +105,10 @@ class ZDTPunch {
  public:
   using TimePoint = std::chrono::steady_clock::time_point;
 
-  ZDTPunch(PunchOffer offer, TimePoint now);
+  // local_migration: whether this host offers connection migration. The peer's
+  // offer arrives in the handshake, and the connection enables it only if both
+  // asked.
+  ZDTPunch(PunchOffer offer, TimePoint now, bool local_migration);
 
   ZNET_NODISCARD const PunchOffer& offer() const { return offer_; }
 
@@ -148,6 +151,7 @@ class ZDTPunch {
   void OnRelayBound(const InetAddress& from, Buffer& in);
 
   PunchOffer offer_;
+  bool local_migration_ = false;
   std::vector<Candidate> direct_;
   std::vector<Relay> relays_;
   backends::ZDTConnection connection_;

@@ -760,6 +760,86 @@ TEST(ZDTMigration, SurvivesAClientRebind) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+// migration is negotiated: with only the server opting in, the client never
+// stamps a cid, so a rebind leaves the server unable to re-path and the session
+// does not survive. This is what the handshake capability bit guarantees.
+TEST(ZDTMigration, DoesNotMigrateUnlessBothEndsOptIn) {
+  ASSERT_EQ(Init(), Result::Success);
+  PortNumber port = FreeUdpPort();
+  RoundTripState state;
+
+  ServerConfig server_config{"127.0.0.1", port, std::chrono::seconds(5),
+                             ConnectionType::ZDT};
+  server_config.child_options.zdt.enable_connection_migration = true;
+  Server server{server_config};
+  server.SetEventCallback([&](Event& event) {
+    EventDispatcher dispatcher{event};
+    dispatcher.Dispatch<IncomingClientConnectedEvent>(
+        [&](IncomingClientConnectedEvent& ev) {
+          auto codec = std::make_shared<Codec>();
+          codec->Add(kPacketDemo, std::make_unique<DemoSerializer>());
+          ev.session()->SetCodec(codec);
+          ev.session()->SetHandler(
+              std::make_shared<ServerEchoHandler>(ev.session()));
+          return false;
+        });
+  });
+  ASSERT_EQ(server.Bind(), Result::Success);
+  ASSERT_EQ(server.Listen(), Result::Success);
+
+  std::shared_ptr<PeerSession> client_session;
+  ClientConfig client_config{"127.0.0.1", port, std::chrono::seconds(5),
+                             ConnectionType::ZDT};
+  // client leaves migration off, so the two never negotiate it
+  Client client{client_config};
+  client.SetEventCallback([&](Event& event) {
+    EventDispatcher dispatcher{event};
+    dispatcher.Dispatch<ClientConnectedToServerEvent>(
+        [&](ClientConnectedToServerEvent& ev) {
+          auto codec = std::make_shared<Codec>();
+          codec->Add(kPacketDemo, std::make_unique<DemoSerializer>());
+          ev.session()->SetCodec(codec);
+          ev.session()->SetHandler(std::make_shared<ClientReplyHandler>(&state));
+          client_session = ev.session();
+          auto packet = std::make_shared<DemoPacket>();
+          packet->text = "before";
+          ev.session()->SendPacket(packet);
+          return false;
+        });
+  });
+  ASSERT_EQ(client.Bind(), Result::Success);
+  ASSERT_EQ(client.Connect(), Result::Success);
+
+  auto wait_for = [](std::atomic_bool& flag, int ms) {
+    auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (!flag && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return flag.load();
+  };
+
+  ASSERT_TRUE(wait_for(state.got_reply, 5000)) << "no reply before the rebind";
+  ASSERT_TRUE(client_session != nullptr);
+
+  // the rebind still moves the socket, but with no negotiated migration the
+  // server cannot follow it, so the reply never comes back
+  ASSERT_EQ(client.Rebind("127.0.0.1", FreeUdpPort()), Result::Success);
+  state.got_reply = false;
+  auto after = std::make_shared<DemoPacket>();
+  after->text = "after";
+  client_session->SendPacket(after);
+  EXPECT_FALSE(wait_for(state.got_reply, 2000))
+      << "the session migrated without both ends opting in";
+#if ZNET_ENABLE_METRICS
+  EXPECT_EQ(server.metrics().zdt.path_migrations, 0u) << "server re-pathed anyway";
+#endif
+
+  client.Disconnect();
+  server.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
 TEST(ZDTIntegration, RejectsIncompatibleVersion) {
   ASSERT_EQ(Init(), Result::Success);
   PortNumber port = FreeUdpPort();
@@ -2391,6 +2471,7 @@ bool DoRequest2ExpectReply(UDPSocket& socket, const InetAddress& server_addr,
   request.WriteInetAddress(server_addr);
   request.WriteInt<uint16_t>(1200);
   request.WriteInt<uint64_t>(0xABCDEF12);
+  request.WriteInt<uint8_t>(0);  // capability flags: no migration
   socket.SendTo(server_addr, request.data(), request.size());
 
   uint8_t buf[ZNET_MAX_BUFFER_SIZE];

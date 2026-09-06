@@ -156,7 +156,9 @@ void Host::Punch(PunchOffer offer, PunchCallback on_done) {
     return;
   }
   PunchInFlight punch;
-  punch.machine.reset(new internal::ZDTPunch(std::move(offer), clock::now()));
+  punch.machine.reset(new internal::ZDTPunch(
+      std::move(offer), clock::now(),
+      config_.session_options.zdt.enable_connection_migration));
   punch.on_done = std::move(on_done);
   std::unique_lock<std::mutex> lock(pending_mutex_);
   if (!running_.load()) {

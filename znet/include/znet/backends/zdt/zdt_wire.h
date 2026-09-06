@@ -39,7 +39,13 @@ namespace znet {
 namespace backends {
 
 /** @brief Protocol version, checked for strict equality during the handshake. */
-ZNET_INLINE_CONSTEXPR uint8_t kZDTProtocolVersion = 4;
+ZNET_INLINE_CONSTEXPR uint8_t kZDTProtocolVersion = 5;
+
+// Capability flags each side offers in the handshake: the server in Reply1 and
+// the client in Request2; the two peers of a punch in Request1 and Reply2. Each
+// side ANDs its own offer with the peer's, so a feature turns on only when both
+// asked for it. See ZDTConnection.
+ZNET_INLINE_CONSTEXPR uint8_t kZDTCapMigration = 1u << 0;  // connection migration
 
 /**
  * @brief Prefix on offline (pre-connection) messages.
