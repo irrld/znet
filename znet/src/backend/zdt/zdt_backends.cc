@@ -274,6 +274,7 @@ Result ZDTClientBackend::Connect() {
   auto transport = std::make_unique<ZDTTransportLayer>(
       socket_, server_address_, config_, /*drains_own_socket=*/false, inbox_,
       connection, session_options_.common);
+  transport_ = transport.get();
   client_session_ = std::make_shared<PeerSession>(
       local_address_, server_address_, std::move(transport), ConnectionType::ZDT,
       /*is_initiator=*/true, /*self_managed=*/false, session_options_);
@@ -297,11 +298,73 @@ void ZDTClientBackend::ReceiveLoop() {
         if (!(*from == *server_address_)) {
           return false;
         }
+        // a PathChallenge is answered here and never reaches the session
+        ZDTOfflineMsg id;
+        if (config_.enable_connection_migration &&
+            PeekOfflineHeader(reinterpret_cast<const uint8_t*>(datagram.data()),
+                              datagram.size(), id) &&
+            id == ZDTOfflineMsg::PathChallenge) {
+          AnswerPathChallenge(datagram);
+          return true;
+        }
         inbox_->Push(
             Buffer(datagram.data(), datagram.size(), Endianness::BigEndian),
             config_.max_inbox_datagrams);
         return true;
       });
+}
+
+void ZDTClientBackend::AnswerPathChallenge(Buffer& datagram) {
+  ZDTOfflineMsg id;
+  if (!ReadOfflineHeader(datagram, id)) {
+    return;
+  }
+  ZDTPathMessage challenge;
+  if (!ReadPathMessage(datagram, challenge) || challenge.cid != guid_) {
+    return;  // not our connection id
+  }
+  Buffer out = WritePathMessage(ZDTOfflineMsg::PathResponse, challenge);
+  socket_->SendTo(*server_address_, out.data(), out.size());
+}
+
+Result ZDTClientBackend::Rebind(const std::string& ip, PortNumber port) {
+  if (!client_session_ || !client_session_->IsAlive() || !transport_) {
+    return Result::NotConnected;
+  }
+  auto address = InetAddress::from(ip, port);
+  if (!address || !address->is_valid()) {
+    return Result::InvalidAddress;
+  }
+  // build the new socket before disturbing the old one, so a failure is safe
+  auto new_socket = std::make_shared<UDPSocket>();
+  Result result = new_socket->Open(server_address_->ipv());
+  if (result != Result::Success) {
+    return result;
+  }
+  new_socket->SetDontFragment(true);
+  ApplySocketBufferSizes(*new_socket, config_.socket_recv_buffer,
+                         config_.socket_send_buffer);
+  result = new_socket->Bind(*address);
+  if (result != Result::Success) {
+    return result;
+  }
+  new_socket->SetBlocking(true);
+  new_socket->SetReceiveTimeout(std::chrono::milliseconds(200));
+
+  // stop the loop on the old socket, then move the send side (the transport)
+  // and the receive side (this backend) to the new one. The transport swaps at
+  // its next tick, so its first datagram from the new port triggers the re-path.
+  StopReceiving();
+  transport_->MigrateSocket(new_socket);
+  socket_ = new_socket;
+  local_address_ = new_socket->local_address();
+  {
+    std::lock_guard<std::mutex> lock(receive_thread_mutex_);
+    receiving_ = true;
+    receive_thread_ = std::thread([this]() { ReceiveLoop(); });
+  }
+  ZNET_LOG_DEBUG("ZDT client rebound to {}", local_address_->readable());
+  return Result::Success;
 }
 
 void ZDTClientBackend::StopReceiving() {
@@ -425,7 +488,16 @@ void ZDTServerBackend::RouteDatagram(Buffer& datagram,
                              config_.max_inbox_datagrams);
       return;
     }
-    // online datagram from an unknown address -> drop.
+    // online datagram from an unknown address. With migration on, a known cid
+    // means a live session may have moved here, so challenge the path before
+    // trusting it; the datagram itself is still dropped, as the path is
+    // unproven. Otherwise there is nothing to do but drop it.
+    uint64_t cid = 0;
+    if (config_.enable_connection_migration &&
+        PeekCid(reinterpret_cast<const uint8_t*>(datagram.data()),
+                datagram.size(), cid)) {
+      ChallengeNewPath(cid, from);
+    }
     ZNET_METRIC(metrics_.zdt.datagrams_unroutable++);
     return;
   }
@@ -496,6 +568,16 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
   if (!AllowHandshake(key)) {
     ZNET_METRIC(metrics_.zdt.rate_limited++);
     return;  // per-source handshake rate exceeded -> drop silently
+  }
+
+  if (id == ZDTOfflineMsg::PathResponse) {
+    if (config_.enable_connection_migration) {
+      ZDTPathMessage response;
+      if (ReadPathMessage(buffer, response)) {
+        CompletePathMigration(from, response);
+      }
+    }
+    return;
   }
 
   if (id == ZDTOfflineMsg::OpenConnectionRequest1) {
@@ -596,6 +678,7 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
     auto transport = std::make_unique<ZDTTransportLayer>(
         socket_, from, config_, /*drains_own_socket=*/false, inbox, connection,
         child_session_options_.common);
+    ZDTTransportLayer* transport_ptr = transport.get();
     auto session = std::make_shared<PeerSession>(
         bind_address_, from, std::move(transport), ConnectionType::ZDT,
         /*is_initiator=*/false, /*self_managed=*/false,
@@ -606,11 +689,89 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
     route.inbox = inbox;
     route.peer = from;
     route.remote_guid = client_guid;
+    route.transport = transport_ptr;
     routes_[key] = std::move(route);
     ZNET_METRIC(metrics_.connections_accepted++);
     pending_accept_.push_back(session);
     reply2();
     ZNET_LOG_DEBUG("ZDT accepted handshake from {} (mtu={})", key, connection.mtu);
+    return;
+  }
+}
+
+void ZDTServerBackend::ChallengeNewPath(
+    uint64_t cid, const std::shared_ptr<InetAddress>& from) {
+  // a live session must own this cid, or the path is not worth a challenge
+  bool known = false;
+  for (const auto& entry : routes_) {
+    if (entry.second.remote_guid == cid && !entry.second.session.expired()) {
+      known = true;
+      break;
+    }
+  }
+  if (!known) {
+    return;
+  }
+  // prune expired challenges, then cap against a spoofed-source flood
+  const auto now = steady_clock::now();
+  for (auto it = pending_paths_.begin(); it != pending_paths_.end();) {
+    if (it->second.expiry <= now) {
+      it = pending_paths_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  const std::string key = from->readable();
+  constexpr size_t kMaxPendingPaths = 256;
+  if (pending_paths_.size() >= kMaxPendingPaths &&
+      pending_paths_.find(key) == pending_paths_.end()) {
+    return;
+  }
+  PendingPath pending;
+  pending.cid = cid;
+  pending.nonce = GenerateGuid();
+  pending.expiry = now + std::chrono::seconds(5);
+  pending_paths_[key] = pending;
+
+  Buffer out = WritePathMessage(ZDTOfflineMsg::PathChallenge,
+                                ZDTPathMessage{cid, pending.nonce});
+  socket_->SendTo(*from, out.data(), out.size());
+}
+
+void ZDTServerBackend::CompletePathMigration(
+    const std::shared_ptr<InetAddress>& from, const ZDTPathMessage& response) {
+  const std::string new_key = from->readable();
+  auto pending = pending_paths_.find(new_key);
+  if (pending == pending_paths_.end() ||
+      pending->second.nonce != response.nonce ||
+      pending->second.cid != response.cid ||
+      pending->second.expiry <= steady_clock::now()) {
+    return;  // no matching challenge, or it expired
+  }
+  const uint64_t cid = pending->second.cid;
+  pending_paths_.erase(pending);
+
+  for (auto it = routes_.begin(); it != routes_.end(); ++it) {
+    if (it->second.remote_guid != cid) {
+      continue;
+    }
+    // hold the session alive so its transport stays valid across MigratePeer
+    auto session = it->second.session.lock();
+    if (!session) {
+      return;  // the session went away under the migration
+    }
+    if (it->first == new_key) {
+      return;  // already here; a duplicate response
+    }
+    Route route = std::move(it->second);
+    routes_.erase(it);
+    route.peer = from;
+    if (route.transport) {
+      route.transport->MigratePeer(from);
+    }
+    routes_[new_key] = std::move(route);
+    ZNET_METRIC(metrics_.zdt.path_migrations++);
+    ZNET_LOG_DEBUG("ZDT migrated a session to {}", new_key);
     return;
   }
 }

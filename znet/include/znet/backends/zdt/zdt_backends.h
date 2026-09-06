@@ -80,6 +80,12 @@ class ZDTClientBackend : public ClientBackend {
     }
   }
 
+  // Moves the live session to a new local address: binds a fresh socket, swaps
+  // both the send side (the transport) and the receive loop to it, and lets the
+  // server re-path via the connection id. Needs enable_connection_migration on
+  // both ends. ZDT-specific, so not on the ClientBackend interface.
+  Result Rebind(const std::string& ip, PortNumber port);
+
  private:
   // on success fills `out` with the negotiated connection and returns Result::Success; otherwise a
   // granular failure Result (IncompatibleVersion, ServerFull, Timeout, ...).
@@ -89,6 +95,8 @@ class ZDTClientBackend : public ClientBackend {
   // the client loop's next tick. started only after the handshake, which reads
   // the socket directly and would otherwise race it.
   void ReceiveLoop();
+  // replies to a server PathChallenge so the server can move its send target
+  void AnswerPathChallenge(Buffer& datagram);
 
   std::shared_ptr<InetAddress> server_address_;
   std::shared_ptr<InetAddress> local_address_;
@@ -99,6 +107,8 @@ class ZDTClientBackend : public ClientBackend {
   std::atomic_bool receiving_{false};
   std::function<void()> on_data_;
   std::shared_ptr<PeerSession> client_session_;
+  // owned by client_session_; used only while that session is alive
+  ZDTTransportLayer* transport_ = nullptr;
   ZDTOptions config_;
   SessionOptions session_options_;  // passed to the PeerSession it creates
   uint64_t guid_ = 0;
@@ -147,6 +157,16 @@ class ZDTServerBackend : public ServerBackend {
     std::shared_ptr<ZDTInbox> inbox;
     std::shared_ptr<InetAddress> peer;
     uint64_t remote_guid = 0;
+    // owned by the session; used only while route.session is locked alive
+    ZDTTransportLayer* transport = nullptr;
+  };
+
+  // a path challenge sent to a new address, awaiting its response. Migration is
+  // off by default, so this stays empty unless enable_connection_migration.
+  struct PendingPath {
+    uint64_t cid = 0;
+    uint64_t nonce = 0;
+    std::chrono::steady_clock::time_point expiry;
   };
 
   // body of the receive thread: blocks in recvfrom and routes each datagram as
@@ -158,6 +178,13 @@ class ZDTServerBackend : public ServerBackend {
                      const std::shared_ptr<InetAddress>& from);
   void HandleOffline(Buffer& buffer, const std::shared_ptr<InetAddress>& from,
                      size_t datagram_size);
+  // migration: an online datagram from an unknown address carrying a known cid
+  // means a session may have moved. Challenge the new path; on a valid
+  // response, move the route to it. Both no-op without
+  // enable_connection_migration. Receive thread only, under state_mutex_.
+  void ChallengeNewPath(uint64_t cid, const std::shared_ptr<InetAddress>& from);
+  void CompletePathMigration(const std::shared_ptr<InetAddress>& from,
+                             const ZDTPathMessage& response);
   void MaybeRotateSecret();
   ZDTCookie CookieFor(const std::string& peer_readable, uint32_t epoch) const;
   // per-source handshake rate limit (bounded, self-pruning). returns false when
@@ -203,6 +230,9 @@ class ZDTServerBackend : public ServerBackend {
   std::atomic_bool receiving_{false};
 
   std::unordered_map<std::string, Route> routes_;
+  // keyed by the candidate new address; capped so a spoofed-source flood of
+  // challenges cannot grow it without bound
+  std::unordered_map<std::string, PendingPath> pending_paths_;
   std::deque<std::shared_ptr<PeerSession>> pending_accept_;
   std::unordered_map<std::string, SourceRate> source_rate_;
 

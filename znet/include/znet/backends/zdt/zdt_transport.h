@@ -89,6 +89,10 @@ class ZDTTransportLayer : public TransportLayer {
   // peer_ is never written from elsewhere.
   void MigratePeer(std::shared_ptr<InetAddress> new_peer);
 
+  // Swaps the socket the send path uses, after a local rebind moved this side
+  // to a new address. Same threading contract as MigratePeer.
+  void MigrateSocket(std::shared_ptr<UDPSocket> new_socket);
+
  private:
   using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -265,13 +269,14 @@ class ZDTTransportLayer : public TransportLayer {
     bool unrel_started = false;
   };
 
-  // applies a pending MigratePeer, on the transport thread
-  void ApplyPendingPeer();
+  // applies a pending MigratePeer/MigrateSocket, on the transport thread
+  void ApplyPendingMigration();
 
-  std::shared_ptr<UDPSocket> socket_;
+  std::shared_ptr<UDPSocket> socket_;  // written only on the transport thread
   std::shared_ptr<InetAddress> peer_;  // written only on the transport thread
-  std::mutex migrate_mutex_;           // guards pending_peer_
+  std::mutex migrate_mutex_;           // guards the pending_ fields below
   std::shared_ptr<InetAddress> pending_peer_;
+  std::shared_ptr<UDPSocket> pending_socket_;
   ZDTOptions config_;
   bool drains_own_socket_;
   std::shared_ptr<ZDTInbox> inbox_;

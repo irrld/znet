@@ -143,6 +143,7 @@ struct ZDTServerMetrics {
   uint64_t datagrams_unroutable = 0;  /**< Online datagram from an unknown peer. */
   /** @brief Dropped by the allow/deny lists or the attempt throttle. */
   uint64_t admission_rejected = 0;
+  uint64_t path_migrations = 0;  /**< Sessions moved to a new address. */
 };
 
 /** @brief Listener-scope counters, across every session it accepted. */

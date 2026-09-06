@@ -872,19 +872,33 @@ void ZDTTransportLayer::MigratePeer(std::shared_ptr<InetAddress> new_peer) {
   pending_peer_ = std::move(new_peer);
 }
 
-void ZDTTransportLayer::ApplyPendingPeer() {
-  std::shared_ptr<InetAddress> next;
+void ZDTTransportLayer::MigrateSocket(std::shared_ptr<UDPSocket> new_socket) {
+  if (!new_socket) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(migrate_mutex_);
+  pending_socket_ = std::move(new_socket);
+}
+
+void ZDTTransportLayer::ApplyPendingMigration() {
+  std::shared_ptr<InetAddress> next_peer;
+  std::shared_ptr<UDPSocket> next_socket;
   {
     std::lock_guard<std::mutex> lock(migrate_mutex_);
-    if (!pending_peer_) {
-      return;
-    }
-    next = std::move(pending_peer_);
+    next_peer = std::move(pending_peer_);
+    next_socket = std::move(pending_socket_);
     pending_peer_.reset();
+    pending_socket_.reset();
   }
-  ZNET_LOG_DEBUG("ZDT: send path migrating from {} to {}",
-                 peer_ ? peer_->readable() : "?", next->readable());
-  peer_ = std::move(next);
+  if (next_peer) {
+    ZNET_LOG_DEBUG("ZDT: send path retargeted from {} to {}",
+                   peer_ ? peer_->readable() : "?", next_peer->readable());
+    peer_ = std::move(next_peer);
+  }
+  if (next_socket) {
+    ZNET_LOG_DEBUG("ZDT: send path rebound to a new socket");
+    socket_ = std::move(next_socket);
+  }
 }
 
 void ZDTTransportLayer::Update() {
@@ -892,7 +906,7 @@ void ZDTTransportLayer::Update() {
   if (is_closed_) {
     return;
   }
-  ApplyPendingPeer();
+  ApplyPendingMigration();
   if (drains_own_socket_) {
     DrainSocket();
   }

@@ -114,6 +114,12 @@ class Client : public Interface {
 
   ZNET_NODISCARD std::shared_ptr<InetAddress> local_address() const;
 
+  /** @brief The transport backend, for backend-specific operations like a ZDT
+   *         rebind. Internal tier: cast to the concrete backend to use it. */
+  ZNET_NODISCARD backends::ClientBackend* backend() const {
+    return backend_.get();
+  }
+
  private:
   ClientConfig config_;
   std::shared_ptr<InetAddress> server_address_;

@@ -677,6 +677,91 @@ TEST(ZDTIntegration, HandshakeReachesReadyOverUdp) {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+// A client that rebinds to a new local address keeps its session: the server
+// path-validates the new address off the client's first datagram from it and
+// moves its send target there, so traffic keeps flowing both ways.
+TEST(ZDTMigration, SurvivesAClientRebind) {
+  ASSERT_EQ(Init(), Result::Success);
+  PortNumber port = FreeUdpPort();
+  RoundTripState state;
+
+  ServerConfig server_config{"127.0.0.1", port, std::chrono::seconds(5),
+                             ConnectionType::ZDT};
+  server_config.child_options.zdt.enable_connection_migration = true;
+  Server server{server_config};
+  server.SetEventCallback([&](Event& event) {
+    EventDispatcher dispatcher{event};
+    dispatcher.Dispatch<IncomingClientConnectedEvent>(
+        [&](IncomingClientConnectedEvent& ev) {
+          auto codec = std::make_shared<Codec>();
+          codec->Add(kPacketDemo, std::make_unique<DemoSerializer>());
+          ev.session()->SetCodec(codec);
+          ev.session()->SetHandler(
+              std::make_shared<ServerEchoHandler>(ev.session()));
+          return false;
+        });
+  });
+  ASSERT_EQ(server.Bind(), Result::Success);
+  ASSERT_EQ(server.Listen(), Result::Success);
+
+  std::shared_ptr<PeerSession> client_session;
+  ClientConfig client_config{"127.0.0.1", port, std::chrono::seconds(5),
+                             ConnectionType::ZDT};
+  client_config.options.zdt.enable_connection_migration = true;
+  Client client{client_config};
+  client.SetEventCallback([&](Event& event) {
+    EventDispatcher dispatcher{event};
+    dispatcher.Dispatch<ClientConnectedToServerEvent>(
+        [&](ClientConnectedToServerEvent& ev) {
+          auto codec = std::make_shared<Codec>();
+          codec->Add(kPacketDemo, std::make_unique<DemoSerializer>());
+          ev.session()->SetCodec(codec);
+          ev.session()->SetHandler(std::make_shared<ClientReplyHandler>(&state));
+          client_session = ev.session();
+          auto packet = std::make_shared<DemoPacket>();
+          packet->text = "before";
+          ev.session()->SendPacket(packet);
+          return false;
+        });
+  });
+  ASSERT_EQ(client.Bind(), Result::Success);
+  ASSERT_EQ(client.Connect(), Result::Success);
+
+  auto wait_for = [](std::atomic_bool& flag, int ms) {
+    auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (!flag && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return flag.load();
+  };
+
+  ASSERT_TRUE(wait_for(state.got_reply, 5000)) << "no reply before the rebind";
+  ASSERT_TRUE(client_session != nullptr);
+
+  // move the client to a new local port under the live session
+  auto* backend = static_cast<backends::ZDTClientBackend*>(client.backend());
+  ASSERT_NE(backend, nullptr);
+  ASSERT_EQ(backend->Rebind("127.0.0.1", FreeUdpPort()), Result::Success);
+
+  // a reliable request over the new path: its first datagram triggers the
+  // server's challenge and is dropped, and the retransmit lands once the path
+  // is validated, so a reply proves the session survived the move
+  state.got_reply = false;
+  auto after = std::make_shared<DemoPacket>();
+  after->text = "after";
+  client_session->SendPacket(after);
+  EXPECT_TRUE(wait_for(state.got_reply, 8000))
+      << "session did not survive the rebind";
+#if ZNET_ENABLE_METRICS
+  EXPECT_GE(server.metrics().zdt.path_migrations, 1u) << "server never re-pathed";
+#endif
+
+  client.Disconnect();
+  server.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
 TEST(ZDTIntegration, RejectsIncompatibleVersion) {
   ASSERT_EQ(Init(), Result::Success);
   PortNumber port = FreeUdpPort();
