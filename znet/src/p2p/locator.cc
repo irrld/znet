@@ -46,6 +46,13 @@ Result PeerLocator::Connect() {
     is_ready_ = false;
     peer_name_.clear();
   }
+  if (config_.relocate_trigger == RelocateTrigger::Watch) {
+    // the network watcher is not built yet; the seam is here so it can drive
+    // Relocate() once it is. Until then, call Relocate() from the application.
+    ZNET_LOG_WARN(
+        "PeerLocator: RelocateTrigger::Watch is not implemented yet; call "
+        "Relocate() manually on a network change.");
+  }
   // the host may already be up from a previous stint on the rendezvous; the
   // mesh survives losing the link, so that is not an error
   Result result = host_.Start();

@@ -29,6 +29,17 @@ template <typename Locator>
 class LinkPacketHandler;
 }  // namespace internal
 
+/** @brief What drives a Relocate() after the local network changes. */
+enum class RelocateTrigger {
+  /** @brief The application calls PeerLocator::Relocate() itself, e.g. from a
+   *         platform network-change callback. */
+  Manual,
+  /** @brief The locator watches the network and relocates on a change on its
+   *         own. Reserved: the watcher is not built yet, so this behaves like
+   *         Manual for now. */
+  Watch,
+};
+
 /** @brief Where a PeerLocator finds its rendezvous and how it punches. */
 struct PeerLocatorConfig {
   std::string server_address;
@@ -43,6 +54,9 @@ struct PeerLocatorConfig {
   std::chrono::milliseconds punch_timeout{5000};
   /** @brief PunchOffer::relay_delay for every punch. */
   std::chrono::milliseconds relay_delay{1000};
+  /** @brief How a relocate is triggered after a network change. Manual today;
+   *         Watch is the seam for a future network watcher. */
+  RelocateTrigger relocate_trigger = RelocateTrigger::Manual;
 };
 
 /**
