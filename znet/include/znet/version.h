@@ -27,7 +27,7 @@
 #define ZNET_VERSION_H_
 
 #define ZNET_VERSION_MAJOR 4
-#define ZNET_VERSION_MINOR 2
+#define ZNET_VERSION_MINOR 3
 #define ZNET_VERSION_PATCH 0
 
 /**
