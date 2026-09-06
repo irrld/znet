@@ -65,6 +65,7 @@ set(ZNET_SOURCES
         src/backend/zdt/zdt_ack_history.cc
         src/backend/zdt/zdt_congestion.cc
         src/backend/zdt/zdt_wire.cc
+        src/backend/zdt/zdt_cookie.cc
         src/backend/zdt/zdt_net.cc
         src/backend/zdt/zdt_transport.cc
         src/backend/zdt/zdt_backends.cc

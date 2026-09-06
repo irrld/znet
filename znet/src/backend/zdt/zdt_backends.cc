@@ -438,12 +438,8 @@ Result ZDTServerBackend::Bind() {
   if (local) {
     bind_address_ = local;
   }
-  // cookie-signing secret + server identity. RAND_bytes needs znet::Init(),
-  // which Server::Bind() runs before invoking the backend.
-  RAND_bytes(secret_current_.data(), static_cast<int>(secret_current_.size()));
-  has_previous_secret_ = false;
-  epoch_ = 0;
-  last_rotation_ = steady_clock::now();
+  // server identity. cookie_secret_ seeded itself at construction; both it and
+  // GenerateGuid need znet::Init(), which Server::Bind() runs before this.
   server_guid_ = GenerateGuid();
   is_bind_ = true;
   ZNET_LOG_DEBUG("ZDT bind to: {}", bind_address_->readable());
@@ -478,7 +474,7 @@ void ZDTServerBackend::RouteDatagram(Buffer& datagram,
                                      const std::shared_ptr<InetAddress>& from) {
   ZNET_ZDT_ENTER_DOMAIN(receive_domain_);
   std::lock_guard<std::mutex> lock(state_mutex_);
-  MaybeRotateSecret();
+  cookie_secret_.MaybeRotate(config_.cookie_secret_rotation, steady_clock::now());
   if (static_cast<uint8_t>(datagram.data()[0]) & kFlagOnline) {
     auto it = routes_.find(from->readable());
     if (it != routes_.end()) {
@@ -504,31 +500,6 @@ void ZDTServerBackend::RouteDatagram(Buffer& datagram,
   // offline datagrams are parsed straight out of the scratch; the reply
   // buffers HandleOffline builds are its own
   HandleOffline(datagram, from, datagram.size());
-}
-
-void ZDTServerBackend::MaybeRotateSecret() {
-  auto now = steady_clock::now();
-  if (now - last_rotation_ < config_.cookie_secret_rotation) {
-    return;
-  }
-  secret_previous_ = secret_current_;
-  has_previous_secret_ = true;
-  RAND_bytes(secret_current_.data(), static_cast<int>(secret_current_.size()));
-  epoch_++;
-  last_rotation_ = now;
-}
-
-ZDTCookie ZDTServerBackend::CookieFor(const std::string& peer_readable,
-                                      uint32_t epoch) const {
-  // pick the secret that `epoch` was minted under: the previous one only across
-  // a single rotation, so a cookie issued just before a rotation still verifies.
-  // any other epoch falls through to the current secret and simply fails to match.
-  if (epoch != epoch_ && has_previous_secret_ && epoch == epoch_ - 1) {
-    return ComputeCookie(secret_previous_.data(), secret_previous_.size(),
-                         peer_readable, epoch);
-  }
-  return ComputeCookie(secret_current_.data(), secret_current_.size(),
-                       peer_readable, epoch);
 }
 
 bool ZDTServerBackend::AllowHandshake(const std::string& peer_readable) {
@@ -610,14 +581,14 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
     uint16_t mtu = static_cast<uint16_t>(std::min<size_t>(
         datagram_size,
         ZDTPayloadForLinkMTU(config_.mtu_ladder.front(), from->ipv())));
-    ZDTCookie cookie = CookieFor(key, epoch_);
+    ZDTCookie cookie = cookie_secret_.Compute(key, cookie_secret_.epoch());
     Buffer out(Endianness::BigEndian);
     WriteOfflineHeader(out, ZDTOfflineMsg::OpenConnectionReply1);
     out.WriteInt<uint64_t>(server_guid_);
     out.WriteInt<uint16_t>(mtu);
     out.WriteInt<uint8_t>(static_cast<uint8_t>(cookie.size()));
     out.Write(cookie.data(), cookie.size());
-    out.WriteInt<uint32_t>(epoch_);
+    out.WriteInt<uint32_t>(cookie_secret_.epoch());
     socket_->SendTo(*from, out.data(), out.size());
     return;
   }
@@ -636,7 +607,7 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
     uint64_t client_guid = buffer.ReadInt<uint64_t>();
 
     // validate the cookie against the source address (return-routability).
-    if (!ConstTimeEqual(cookie, CookieFor(key, epoch))) {
+    if (!ConstTimeEqual(cookie, cookie_secret_.Compute(key, epoch))) {
       ZNET_METRIC(metrics_.zdt.cookies_rejected++);
       // silent drop: never reply to an unvalidated address.
       return;
@@ -698,14 +669,6 @@ void ZDTServerBackend::HandleOffline(Buffer& buffer,
   }
 }
 
-// the cookie key for path validation: the candidate address bound to the cid,
-// domain-separated from a plain handshake key (a readable address never starts
-// with this prefix) so a handshake cookie can never stand in for a path one.
-static std::string PathCookieKey(const std::string& peer_readable,
-                                 uint64_t cid) {
-  return "path|" + peer_readable + "|" + std::to_string(cid);
-}
-
 void ZDTServerBackend::ChallengeNewPath(
     uint64_t cid, const std::shared_ptr<InetAddress>& from) {
   // a live session must own this cid, or the path is not worth a challenge
@@ -720,25 +683,18 @@ void ZDTServerBackend::ChallengeNewPath(
     return;
   }
   // stateless: the cookie binds this address and cid, so only a host that
-  // receives there can echo it back and the server keeps nothing meanwhile. The
-  // epoch rides along so a secret rotation between challenge and response still
-  // verifies. See CompletePathMigration.
-  ZDTPathMessage msg;
-  msg.cid = cid;
-  msg.epoch = epoch_;
-  msg.cookie = CookieFor(PathCookieKey(from->readable(), cid), epoch_);
-  Buffer out = WritePathMessage(ZDTOfflineMsg::PathChallenge, msg);
+  // receives there can echo it back and the server keeps nothing meanwhile.
+  Buffer out = WritePathMessage(
+      ZDTOfflineMsg::PathChallenge,
+      MakePathChallenge(cookie_secret_, from->readable(), cid));
   socket_->SendTo(*from, out.data(), out.size());
 }
 
 void ZDTServerBackend::CompletePathMigration(
     const std::shared_ptr<InetAddress>& from, const ZDTPathMessage& response) {
   const std::string new_key = from->readable();
-  // recompute the cookie this address and cid would have been challenged with; a
-  // match proves the response came back from the path we probed.
-  if (!ConstTimeEqual(
-          response.cookie,
-          CookieFor(PathCookieKey(new_key, response.cid), response.epoch))) {
+  // a matching cookie proves the response came back from the path we probed.
+  if (!VerifyPathResponse(cookie_secret_, new_key, response)) {
     return;
   }
   const uint64_t cid = response.cid;

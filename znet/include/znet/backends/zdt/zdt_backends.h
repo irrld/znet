@@ -40,6 +40,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include "znet/backends/zdt/zdt_cookie.h"
 #include "znet/backends/zdt/zdt_domain.h"
 #include "znet/backends/zdt/zdt_transport.h"
 
@@ -176,8 +177,6 @@ class ZDTServerBackend : public ServerBackend {
   void ChallengeNewPath(uint64_t cid, const std::shared_ptr<InetAddress>& from);
   void CompletePathMigration(const std::shared_ptr<InetAddress>& from,
                              const ZDTPathMessage& response);
-  void MaybeRotateSecret();
-  ZDTCookie CookieFor(const std::string& peer_readable, uint32_t epoch) const;
   // per-source handshake rate limit (bounded, self-pruning). returns false when
   // the source has exceeded per_source_handshake_rate this second.
   bool AllowHandshake(const std::string& peer_readable);
@@ -200,7 +199,7 @@ class ZDTServerBackend : public ServerBackend {
     std::chrono::steady_clock::time_point window_start;
   };
 
-  // routes_, pending_accept_, source_rate_, the cookie secrets and metrics_ are
+  // routes_, pending_accept_, source_rate_, the cookie secret and metrics_ are
   // written by the receive thread and read by the Server's tick, so they need a
   // lock. Deliberately not mutex_: the Server holds that across a whole tick,
   // and stalling the receive thread that long is what overflows the socket.
@@ -224,12 +223,8 @@ class ZDTServerBackend : public ServerBackend {
   std::deque<std::shared_ptr<PeerSession>> pending_accept_;
   std::unordered_map<std::string, SourceRate> source_rate_;
 
-  // cookie signing secrets (touched only on the receive thread).
-  std::array<uint8_t, 32> secret_current_{};
-  std::array<uint8_t, 32> secret_previous_{};
-  uint32_t epoch_ = 0;
-  bool has_previous_secret_ = false;
-  std::chrono::steady_clock::time_point last_rotation_;
+  // cookie signing secret for handshake and migration (receive thread only).
+  CookieSecret cookie_secret_;
   uint64_t server_guid_ = 0;
   ServerMetrics metrics_;
 };
